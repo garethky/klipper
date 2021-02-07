@@ -172,7 +172,7 @@ canbus_set_filter(uint32_t id)
     /* Initialisation mode for the filter */
     SOC_CAN->FA1R = 0;
 
-    uint32_t idadmin = CANBUS_ID_UUID;
+    uint32_t idadmin = CANBUS_ID_ADMIN;
     SOC_CAN->sFilterRegister[CAN_FILTER_NUMBER].FR1 = idadmin << (5 + 16);
     SOC_CAN->sFilterRegister[CAN_FILTER_NUMBER].FR2 = id << (5 + 16);
 
@@ -188,12 +188,6 @@ canbus_set_filter(uint32_t id)
     SOC_CAN->FA1R = filternbrbitpos;
     /* Leave the initialisation mode for the filter */
     SOC_CAN->FMR &= ~CAN_FMR_FINIT;
-}
-
-void
-canbus_reboot(void)
-{
-    NVIC_SystemReset();
 }
 
 // This function handles CAN global interrupts
@@ -292,7 +286,7 @@ can_init(void)
         ;
 
     /*##-2- Configure the CAN Filter #######################################*/
-    canbus_set_filter(CANBUS_ID_SET);
+    canbus_set_filter(0);
 
     /*##-3- Configure Interrupts #################################*/
     armcm_enable_irq(CAN_IRQHandler, CAN_RX0_IRQn, 0);
