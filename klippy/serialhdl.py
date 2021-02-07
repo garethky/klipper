@@ -4,7 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, threading, os
-import serial
+import serial, can
 
 import msgproto, chelper, util
 
@@ -102,6 +102,26 @@ class SerialReader:
             self.ffi_lib.serialqueue_set_receive_window(
                 self.serialqueue, receive_window)
         return True
+    def connect_canbus(self, canbus_uuid, canbus_iface="can0"):
+        logging.info("Starting CAN connect")
+        start_time = self.reactor.monotonic()
+        while 1:
+            if self.reactor.monotonic() > start_time + 90.:
+                raise error("Unable to connect")
+            try:
+                canbus_query = CANBusQuery(self.reactor, canbus_uuid,
+                                           canbus_iface)
+            except (IOError, can.CanError) as e:
+                logging.warn("Unable to open CAN port: %s", e)
+                self.reactor.pause(self.reactor.monotonic() + 5.)
+                continue
+            can_fd, can_id = canbus_query.get_can_socket()
+            if can_fd is None:
+                logging.info("Timeout on connect")
+                continue
+            ret = self._start_session(can_fd, 'c', can_id)
+            if ret:
+                break
     def connect_pipe(self, filename):
         logging.info("Starting connect")
         start_time = self.reactor.monotonic()
@@ -266,6 +286,69 @@ class SerialRetryCommand:
             reactor.pause(reactor.monotonic() + retry_delay)
             retries -= 1
             retry_delay *= 2.
+
+# Class to obtain the CANBus id for a given chip uuid
+class CANBusQuery:
+    CANBUS_ID_ADMIN = 0x3f0
+    CMD_QUERY = 1
+    RESP_HAVE_CANID = 33
+    def __init__(self, reactor, canbus_uuid, canbus_iface='can0'):
+        self.reactor = reactor
+        self.canbus_iface = canbus_iface
+        try:
+            uuid = int(canbus_uuid, 16)
+        except ValueError:
+            uuid = -1
+        if uuid < 0 or uuid > 0xffffffffffff:
+            raise error("Invalid CAN uuid")
+        self.uuid = [(uuid >> (40 - i*8)) & 0xff for i in range(6)]
+        self.bus = self._open_socket(self.CANBUS_ID_ADMIN + 1)
+        self.completion = reactor.completion()
+        self.fd_hdl = reactor.register_fd(self.bus.fileno(), self._process_data)
+        self.timer_hdl = reactor.register_timer(self._send_query, reactor.NOW)
+    def _open_socket(self, filter_id):
+        filters = [{"can_id": filter_id, "can_mask": 0x7ff, "extended": False}]
+        bus = can.interface.Bus(channel=self.canbus_iface, can_filters=filters,
+                                bustype='socketcan')
+        bus.close = bus.shutdown # XXX
+        return bus
+    def _disconnect(self):
+        if self.fd_hdl is None:
+            return
+        self.reactor.unregister_fd(self.fd_hdl)
+        self.fd_hdl = None
+        self.reactor.unregister_timer(self.timer_hdl)
+        self.timer_hdl = None
+        self.bus.close()
+        self.bus = None
+    def _process_data(self, eventtime):
+        msg = self.bus.recv(0.)
+        if (msg is None or msg.arbitration_id != self.CANBUS_ID_ADMIN + 1
+            or msg.dlc != 8 or msg.data[0] != self.RESP_HAVE_CANID
+            or list(msg.data[1:7]) != self.uuid):
+            return
+        self._disconnect()
+        canbus_id = 0x100 + (msg.data[7] << 1)
+        self.completion.complete(canbus_id)
+    def _send_query(self, eventtime):
+        msg = can.Message(arbitration_id=self.CANBUS_ID_ADMIN,
+                          data=[self.CMD_QUERY] + self.uuid,
+                          is_extended_id=False)
+        self.bus.send(msg)
+        return eventtime + 0.100
+    def get_can_socket(self):
+        canbus_id = self.completion.wait(self.reactor.monotonic() + 5.)
+        if canbus_id is None:
+            # Timeout
+            self._disconnect()
+            return None, None
+        # Create data socket
+        try:
+            cb_data = self._open_socket(canbus_id + 1)
+        except (IOError, can.CanError) as e:
+            logging.warn("Unable to open CAN data port: %s", e)
+            return None, None
+        return cb_data, canbus_id
 
 # Attempt to place an AVR stk500v2 style programmer into normal mode
 def stk500v2_leave(ser, reactor):
