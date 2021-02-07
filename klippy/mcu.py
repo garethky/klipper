@@ -409,12 +409,18 @@ class MCU:
         if self._name.startswith('mcu '):
             self._name = self._name[4:]
         # Serial port
-        self._serialport = config.get('serial')
-        self._baud = 0
-        if not (self._serialport.startswith("/dev/rpmsg_")
-                or self._serialport.startswith("/tmp/klipper_host_")):
-            self._baud = config.getint('baud', 250000, minval=2400)
         self._serial = serialhdl.SerialReader(self._reactor)
+        self._baud = 0
+        self._canbus_iface = None
+        canbus_uuid = config.get('canbus_uuid', None)
+        if canbus_uuid is not None:
+            self._serialport = canbus_uuid
+            self._canbus_iface = config.get('canbus_interface', 'can0')
+        else:
+            self._serialport = config.get('serial')
+            if not (self._serialport.startswith("/dev/rpmsg_")
+                    or self._serialport.startswith("/tmp/klipper_host_")):
+                self._baud = config.getint('baud', 250000, minval=2400)
         # Restarts
         restart_methods = [None, 'arduino', 'cheetah', 'command', 'rpi_usb']
         self._restart_method = 'command'
@@ -611,7 +617,10 @@ class MCU:
                 # Try toggling usb power
                 self._check_restart("enable power")
             try:
-                if self._baud:
+                if self._canbus_iface is not None:
+                    self._serial.connect_canbus(self._serialport,
+                                                self._canbus_iface)
+                elif self._baud:
                     # Cheetah boards require RTS to be deasserted
                     # else a reset will trigger the built-in bootloader.
                     rts = (resmeth != "cheetah")
