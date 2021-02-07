@@ -30,9 +30,10 @@ help_txt = """
 re_eval = re.compile(r'\{(?P<eval>[^}]*)\}')
 
 class KeyboardReader:
-    def __init__(self, reactor, serialport, baud):
+    def __init__(self, reactor, serialport, baud, canbus_iface=None):
         self.serialport = serialport
         self.baud = baud
+        self.canbus_iface = canbus_iface
         self.ser = serialhdl.SerialReader(reactor)
         self.reactor = reactor
         self.start_time = reactor.monotonic()
@@ -54,7 +55,9 @@ class KeyboardReader:
     def connect(self, eventtime):
         self.output(help_txt)
         self.output("="*20 + " attempting to connect " + "="*20)
-        if self.baud:
+        if self.canbus_iface is not None:
+            self.ser.connect_canbus(self.serialport, self.canbus_iface)
+        elif self.baud:
             self.ser.connect_uart(self.serialport, self.baud)
         else:
             self.ser.connect_pipe(self.serialport)
@@ -207,6 +210,8 @@ def main():
     opts.add_option("-v", action="store_true", dest="verbose",
                     help="enable debug messages")
     opts.add_option("-b", "--baud", type="int", dest="baud", help="baud rate")
+    opts.add_option("-c", "--canbus_iface", dest="canbus_iface",
+                    help="Use CAN bus iterface; serialdevice is the chip UUID")
     options, args = opts.parse_args()
     if len(args) != 1:
         opts.error("Incorrect number of arguments")
@@ -223,7 +228,7 @@ def main():
     logging.basicConfig(level=debuglevel)
 
     r = reactor.Reactor()
-    kbd = KeyboardReader(r, serialport, baud)
+    kbd = KeyboardReader(r, serialport, baud, options.canbus_iface)
     try:
         r.run()
     except KeyboardInterrupt:
