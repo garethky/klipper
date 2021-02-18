@@ -158,9 +158,9 @@ CONFIG ../../config/generic-fysetc-s6-v2.cfg
 CONFIG ../../config/generic-mks-rumba32-v1.0.cfg
 
 # Printers using the PRU
-DICTIONARY pru.dict host=linuxprocess.dict
-CONFIG ../../config/generic-cramps.cfg
-CONFIG ../../config/generic-replicape.cfg
+##DICTIONARY pru.dict host=linuxprocess.dict
+##CONFIG ../../config/generic-cramps.cfg
+##CONFIG ../../config/generic-replicape.cfg
 
 # Tests with multiple mcus
 DICTIONARY atmega2560.dict zboard=atmega2560.dict auxboard=atmega2560.dict
