@@ -1,0 +1,21 @@
+# This is a systemd file for the Klipper canbus_assigner.py tool.
+
+# This config is specific to an OctoPi installation of Klipper. If
+# running on a different system, update the paths and username
+# accordingly.
+
+# It also uses a config file location of /home/pi/canbus_ids.cfg .  It
+# is possible to change the location of this config file, but make
+# sure it is located on persistent storage (do not place the config
+# file in /tmp/ ).
+
+[Unit]
+Description=Klipper canbus_assigner.py daemon
+After=multi-user.target
+
+[Service]
+User=pi
+ExecStart=/home/pi/klippy-env/bin/python /home/pi/klipper/scripts/canbus_assigner/canbus_assigner.py /home/pi/canbus_ids.cfg can0
+
+[Install]
+WantedBy=multi-user.target
