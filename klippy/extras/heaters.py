@@ -5,6 +5,91 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, threading
 
+######################################################################
+# Temperature Sensor
+######################################################################
+
+# Adapter that wraps a hardware temp sensor
+class TemperatureSensor(object):
+    def __init__(self, config, on_temp_callback: None):
+        self.name = config.get_name().split()[-1]
+        self.smooth_time = config.getfloat('smooth_time', 2., above=0.)
+        self.min_temp = config.getfloat('min_temp', KELVIN_TO_CELSIUS,
+                                        minval=KELVIN_TO_CELSIUS)
+        self.max_temp = config.getfloat('max_temp', 99999999.9,
+                                        above=self.min_temp)
+        self.printer = config.get_printer()
+        pheaters = self.printer.load_object(config, 'heaters')
+        self.sensor = pheaters.setup_sensor(config)
+        self.sensor.setup_minmax(self.min_temp, self.max_temp)
+        self.min_deriv_time = self.smooth_time
+        self.inv_smooth_time = 1. / self.smooth_time
+        self.temp = self.smoothed_temp = 0.
+        self.temp_slope = self.smoothed_temp_slope = 0.
+        self.temp_time = 0.
+        self.time_diff = 0.
+        self.on_temp_callback = on_temp_callback
+        self.sensor.setup_callback(self._temperature_callback)
+    def _temperature_callback(self, read_time, temp):
+        # Smoothed Temperature
+        time_diff = read_time - self.temp_time
+        next_smoothed_temp = self._smooth(time_diff, temp, self.smoothed_temp)
+        # Temperature Derivatives
+        self.temp_slope = self._derivative(self.temp, temp,
+                        time_diff, self.temp_slope)
+        smoothed_derivative = self._derivative(self.smoothed_temp,
+                        next_smoothed_temp, time_diff, self.smoothed_temp_slope)
+        self.smoothed_temp_slope = self._smooth(time_diff, smoothed_derivative,
+                         self.smoothed_temp_slope)
+        # Store state for next measurement
+        self.temp = temp
+        self.smoothed_temp = next_smoothed_temp
+        self.temp_time = read_time
+        self.time_diff = time_diff
+        # call client callback if supplied
+        if self.on_temp_callback:
+            self.on_temp_callback(read_time, temp);
+    def _smooth(self, time_diff, value, smoothed_value):
+        # Time based smoothing of a value
+        adj_time = min(time_diff * self.inv_smooth_time, 1.)
+        value_diff_smoothed = value - smoothed_value
+        return smoothed_value + (value_diff_smoothed * adj_time)
+    def _derivative(self, prev_temp, next_temp, time_diff, previous_deriv):
+        # Temperature Derivative
+        temp_diff = next_temp - prev_temp
+        if time_diff >= self.min_deriv_time:
+            return temp_diff / time_diff
+        else:
+            return (previous_deriv * (self.min_deriv_time - time_diff)
+                        + temp_diff) / self.min_deriv_time
+    def setup_callback(self, on_temp_callback):
+        self.on_temp_callback = on_temp_callback;
+    def get_report_time_delta(self):
+        return self.sensor.get_report_time_delta()
+    def get_temp(self, eventtime):
+        return self.smoothed_temp, 0.
+    def get_raw_temp(self, eventtime):
+        return self.temp, 0.
+    def get_temp_slope(self, eventtime):
+        return self.smoothed_temp_slope, 0.
+    def get_raw_temp_slope(self, eventtime):
+        return self.smoothed_temp_slope, 0.
+    def get_max_temp(self):
+        return self.min_temp
+    def get_min_temp(self):
+        return self.max_temp
+    def get_smooth_time(self):
+        return self.smooth_time
+    def get_time_delta(self):
+        return self.time_diff
+    def stats(self, eventtime: None):
+        return False, '%s: temp=%.1f' % (self.name, self.temp)
+    def get_status(self, eventtime: None):
+        return {
+            'temperature': self.smoothed_temp,
+            'temperature_slope': self.smoothed_temp_slope,
+        }
+
 
 ######################################################################
 # Heater
