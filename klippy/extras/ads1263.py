@@ -1,10 +1,11 @@
 # ADS1262/1263 ADC Support
 #
-# Copyright (C) 2020 Gareth Farrington <gareth@waves.ky>
+# Copyright (C) 2022 Gareth Farrington <gareth@waves.ky>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import math
-from . import bus
+
+from . import bus, load_cell
 
 # ADS 1263 Commands
 CMD_NOP     = 0x00 # The No Op command
@@ -29,7 +30,7 @@ CHECKSUM_MODE = ["Disabled", "Enabled, Checksum mode (default)",
 DATA_RATE_TABLE = ["2.5 SPS", "5 SPS", "10 SPS", "16.6SPS", "20 SPS (default)",
 "50 SPS", "60 SPS", "100 SPS", "400 SPS", "1200 SPS", "2400 SPS", "4800 SPS",
 "7200 SPS", "14400 SPS", "19200 SPS", "38400 SPS"]
-SAMPLES_PER_S = [2.5, 5, 10, 16.6, 2, 50, 60, 100, 400, 1200, 2400, 4800, 7200,
+SAMPLES_PER_S = [2.5, 5, 10, 16.6, 20, 50, 60, 100, 400, 1200, 2400, 4800, 7200,
 14400, 19200, 38400]
 
 PGA_GAIN_TABLE = ["1 V/V (default)", "2 V/V", "4 V/V", "8 V/V", "16 V/V",
@@ -310,14 +311,29 @@ class ADS1263CommandHelper:
         self.chip.write_reg(reg, bytearray(val))
 
 # Printer class that controls ADS1263 chip
-class ADS1263:
+class ADS1263(load_cell.LoadCellDataSource):
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         # Setup SPI communications on the MCU hosting the sensor
         self.spi = bus.MCU_SPI_from_config(config, 1, default_speed=8000000)
         self.mcu = self.spi.get_mcu()
+        self.samples_per_second = 4 # default is 20SPS
         ADS1263CommandHelper(config, self)
+        #TODO: when klipper restarts, always RESET the ADS_1263
+    # LoadCellDataSource methods
+    def get_spi(self):
+        return self.spi
+    def get_mcu(self):
+        return self.mcu
+    def get_capture_name(self):
+        return "ads1263"
+    def get_samples_per_second(self):
+        return SAMPLES_PER_S[self.samples_per_second]
+    def start_capture(self):
+        self.send_command(CMD_START1)
+    def stop_capture(self):
+        self.send_command(CMD_STOP1)
     def _wait(self, milliseconds = 10):
         systime = self.reactor.monotonic()
         print_time = self.mcu.estimated_print_time(systime)
@@ -356,6 +372,7 @@ class ADS1263:
         currentSetting = REG_MODE2.read(self)[0]
         val = currentSetting
         if rate is not None:
+            self.samples_per_second = rate
             val = FIELD_MODE2_DATA_RATE.set_value(val, rate)
         if pga_enable is not None:
             val = FIELD_MODE2_PGA_ENABLE.set_value(val, pga_enable)
@@ -383,10 +400,6 @@ class ADS1263:
         if len(results):
             return "\n".join(results)
         return None
-    def start_capture(self):
-        self.send_command(CMD_START1)
-    def stop_capture(self):
-        self.send_command(CMD_STOP1)
     def send_command(self, command):
         self.spi.spi_send([command])
     def read_reg(self, reg, register_count=1):
