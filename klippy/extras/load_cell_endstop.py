@@ -4,8 +4,8 @@ from mcu import TRSYNC_SINGLE_MCU_TIMEOUT, TRSYNC_TIMEOUT, MCU_trsync
 import sys
 
 
-#adc_endstop implements mcu_endstop
-class ADC_endstop:
+#LoadCellEndstop implements mcu_endstop
+class LoadCellEndstop:
     def __init__(self, config, sensor):
         self._printer = printer = config.get_printer()
         self._mcu = mcu = sensor.get_mcu()
@@ -17,28 +17,25 @@ class ADC_endstop:
         self._trsyncs = [MCU_trsync(mcu, self._trdispatch)]
         min_int = -sys.maxint - 1
         self.deadband = config.getint("deadband", default=1, minval=1
-            , maxval=0xffff)
-        self.setpoint = config.getint("setpoint", default=0
+            , maxval=0xffffff)
+        self.settling_count = config.getint("settling_count", default=100
+            , minval= 1, maxval=sys.maxint)
+        self.setpoint_alpha = config.getint("setpoint_alpha", default=4
+            , minval= 1, maxval=31)
+        self.trend_alpha = config.getint("trend_alpha", default=1
+            , minval= 1, maxval=31)
+        self.crash_min = config.getint("crash_min", default = -1
             , minval= min_int, maxval=sys.maxint)
-        self.setpoint_alpha = config.getint("setpoint_alpha", default=192
-            , minval= 1, maxval=255)
-        self.trend_alpha = config.getint("trend_alpha", default=64
-            , minval= 1, maxval=255)
-        self.trend_min = config.getint("trend_min", default = -1
+        self.crash_max = config.getint("crash_max", default = 1
             , minval= min_int, maxval=sys.maxint)
-        self.trend_max = config.getint("trend_max", default = 1
-            , minval= min_int, maxval=sys.maxint)
-        if self.trend_min > self.trend_max:
-            "Trend minimum must be less than trend maximum"
-        if self.setpoint > self.trend_max or self.setpoint < self.trend_min:
-            "the setopint must be between trend_min and trend_max"
-                # Setup adc_endstop on the MCU
-        self._mcu.add_config_cmd("config_adc_endstop oid=%d deadband=%d " \
-            "setpoint=%d trend_min=%d trend_max=%d sample_filter_alpha=%d " \
-            "trend_filter_alpha=%d" % (self._oid, self.deadband, self.setpoint,
-            self.trend_min, self.trend_max, self.setpoint_alpha
-            , self.trend_alpha))
-        self._mcu.add_config_cmd("adc_endstop_home oid=%d trsync_oid=0 " \
+        if self.crash_min > self.crash_max:
+            "Crash minimum must be less than crash maximum"
+        self._mcu.add_config_cmd("config_load_cell_endstop oid=%d deadband=%d "\
+            "crash_min=%d crash_max=%d sample_filter_alpha=%d " \
+            "trend_filter_alpha=%d settling_count=%d" % (self._oid
+            , self.deadband, self.crash_min, self.crash_max
+            , self.setpoint_alpha, self.trend_alpha, self.settling_count))
+        self._mcu.add_config_cmd("load_cell_endstop_home oid=%d trsync_oid=0 " \
             "trigger_reason=0 sample_count=0"
             % (self._oid), on_restart=True)
         self._mcu.register_config_callback(self._build_config)
@@ -68,11 +65,12 @@ class ADC_endstop:
         # Lookup commands
         cmd_queue = self._trsyncs[0].get_command_queue()
         self._query_cmd = self._mcu.lookup_query_command(
-            "adc_endstop_query_state oid=%c", "adc_endstop_state oid=%c " \
-            "homing=%c is_triggered=%c trigger_ticks=%u sample=%i ticks=%u",
-            oid=self._oid, cq=cmd_queue)
-        self._home_cmd = self._mcu.lookup_command("adc_endstop_home oid=%c " \
-            "trsync_oid=%c trigger_reason=%c sample_count=%c", cq=cmd_queue)
+            "load_cell_endstop_query_state oid=%c", "load_cell_endstop_state " \
+            "oid=%c homing=%c is_triggered=%c trigger_ticks=%u sample=%i " \
+            "ticks=%u sample_avg=%i trend_avg=%i", oid=self._oid, cq=cmd_queue)
+        self._home_cmd = self._mcu.lookup_command("load_cell_endstop_home " \
+            "oid=%c trsync_oid=%c trigger_reason=%c sample_count=%c"
+            , cq=cmd_queue)
     def home_start(self, print_time, sample_time, sample_count, rest_time,
                    triggered=True):
         # not used:
@@ -110,7 +108,7 @@ class ADC_endstop:
         if self._mcu.is_fileoutput():
             return home_end_time
         params = self._query_cmd.send([self._oid])
-        # clear trsync from adc_endstop
+        # clear trsync from load_cell_endstop
         self._home_cmd.send([self._oid, 0, 0, 0])
         # The time of the first sample that triggered is in "trigger_ticks"
         next_clock = self._mcu.clock32_to_clock64(params['trigger_ticks'])

@@ -290,6 +290,7 @@ class ADS1263CommandHelper:
         val = self.chip.read_reg(REG_FULL_SCALE_CAL, 2)
         gcmd.respond_info(REG_FULL_SCALE_CAL.to_string(val))
     cmd_START_CAPTURE_ADS1263_help = "Start capturing samples"
+    #TODO: for start/stop, dissable these entierly if connected to a load cell
     def cmd_START_CAPTURE_ADS1263(self, gcmd):
         self.chip.start_capture()
     cmd_STOP_CAPTURE_ADS1263_help = "Stop capturing samples"

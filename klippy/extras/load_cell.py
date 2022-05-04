@@ -3,17 +3,22 @@
 # Copyright (C) 2022 Gareth Farrington <gareth@waves.ky>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging, math, threading, logging
+import logging, math, threading, logging, struct
 from probe import PrinterProbe
-from adc_endstop import ADC_endstop
+from load_cell_endstop import LoadCellEndstop
 from . import bus, motion_report
+
+# TODO: move to some soft of logging utility
+# turn bytearrays into pretty hex strings: [0xff, 0x1]
+def hexify(bytes):
+    return "[%s]" % (",".join([hex(b) for b in bytes]))
 
 # Things to go here:
 # responsible for a config section that has:
 # * Reference to what chip should be used, this supplies the chip name to use for selecting the read function in c
 # * The chip must implement methods for start/stop capture
 # * setup code for telling the MCU about the commands in C
-# * adc_endstop configuration?
+# * load_cell_endstop configuration?
 
 
 # Interface for Sensors that want to supply data to run a Load Cell
@@ -76,7 +81,9 @@ class LoadCellCaptureHelper:
     def _add_samples(self, new_capture):
         with self.lock:
             self.capture_buffer.append(new_capture)
-        logging.info("Samples received from MCU! %s", str(new_capture))
+        # DEBUG
+        # d = bytearray(new_capture['data'])
+        # logging.info("Load Cell Samples: %s (%i)", hexify(d), len(d))
     def empty_buffer(self):
         with self.lock:
             last_batch = self.capture_buffer
@@ -108,13 +115,26 @@ class LoadCellCaptureHelper:
     def _extract_byte(self, b, i):
         return (b[i], i+1)
     def _extract_int32(self, b, i):
-        return (b[i] | b[i+1] << 8 | b[i+2] << 16 | b[i+3] << 24, i+4)
-    def _process_error(self, data, i, error_count):
-        error, i = self._extract_byte(data, i, error_count)
-        # this implementation support over-sampling
-        if error != ERROR_DUPELICATE:
+        # bits = b[i] | b[i+1] << 8 | b[i+2] << 16 | b[i+3] << 24
+        value = struct.unpack_from('<i', b, offset=i)[0]
+        # out = 0.0
+        # TODO: do we want to return Volts or raw Counts??
+        # TODO: this conversion should be happenind only in the ADS1263 code, it cant be safe tot do it here as its sensor specific
+        # TODO: Where do we get the reference voltage??
+        #REF = 5.00
+        #if (value >> 31 == 1):
+        #    out = (REF * 2 - value * REF / 0x80000000)
+        #else:
+        #    out = (value * REF / 0x7fffffff)
+        return (value, i + 4)
+    def _process_error(self, data, i, error_count, duplicate_count):
+        error, i = self._extract_byte(data, i)
+        # this implementation supports over-sampling
+        if error == ERROR_DUPELICATE:
+            duplicate_count += 1
+        else:
             error_count += 1
-        return error_count, i
+        return error_count, duplicate_count, i
     def flush(self):
         raw_samples = self.empty_buffer()
         # Load variables to optimize inner loop below
@@ -126,32 +146,49 @@ class LoadCellCaptureHelper:
         # this isnt thread protected....
         last_sequence = self.last_sequence
         # Process every message in raw_samples
-        i = count = error_count = 0
+        count = error_count = duplicate_count = 0
         samples = [None] * (len(raw_samples) * MAX_SAMPLES)
         for params in raw_samples:
             seq = (last_sequence & ~0xffff) | params['sequence']
             if seq < last_sequence:
-                seq += 0x10000  # WUT?? just like, lets add some shit?
+                seq += 0x10000
             last_sequence = seq
             msg_mclock = start_clock + seq*16*sample_ticks
             d = bytearray(params['data'])
             data_len = len(d)
-            while i < data_len:
-                tcode = d[i]
-                timestamp, i = self._extract_byte(d, i)
-                if tcode == TCODE_ERROR:
-                    error_count, i = self._process_error(d, i, error_count)
-                else:
-                    sample, i = self._extract_int32(d, i)
-                    mclock = msg_mclock + (i * sample_ticks)
-                    # timestamp is mcu clock offset shifted by time_shift
-                    sclock = mclock + (timestamp << time_shift)
-                    ptime = round(clock_to_print_time(sclock) - static_delay, 6)
-                    samples[count] = (ptime, sample)
-                    count += 1
+            i = 0
+            try:
+                while i < data_len:
+                    tcode, i = self._extract_byte(d, i)
+                    if tcode == TCODE_ERROR:
+                        error_count, duplicate_count, i = self._process_error(d, i, error_count, duplicate_count)
+                    else:
+                        sample, i = self._extract_int32(d, i)
+                        sample_average, i = self._extract_int32(d, i)
+                        trend_average, i = self._extract_int32(d, i)
+                        mclock = msg_mclock + (i * sample_ticks)
+                        # timestamp is mcu clock offset shifted by time_shift
+                        sclock = mclock + (tcode << time_shift)
+                        ptime = round(clock_to_print_time(sclock) - static_delay, 6)
+                        samples[count] = (ptime, sample, sample_average, trend_average)
+                        count += 1
+            except Exception:
+                logging.info("Load Cell Samples threw an error: %s (%i) i: %i, e: %i, d: %i", hexify(d), data_len, i, error_count, duplicate_count)
+                raise
         self.last_sequence = last_sequence
         del samples[count:]
-        return samples, error_count
+        return samples, error_count, duplicate_count
+
+class LoadCellPrinterObject:
+    def __init__(self, config):
+        self.printer = config.get_printer()
+        self.dump = []
+    def get_status(self, eventtime):
+        dump_temp = self.dump
+        self.dump = []
+        return {'dump': dump_temp}
+    def _add_dump(self, samples):
+        self.dump.append(samples)
 
 class LoadCellCommandHelper:
     def __init__(self, config, load_cell):
@@ -183,24 +220,24 @@ class LoadCellCommandHelper:
 
 # Printer class that controls ADS1263 chip
 class LoadCell:
-    def __init__(self, config, sensor, adc_endstop):
-        self.printer = config.get_printer()
+    def __init__(self, config, sensor, load_cell_endstop):
+        self.printer = printer = config.get_printer()
         # sensor must implement LoadCellDataSource
         self.sensor = sensor
         LoadCellCommandHelper(config, self)
-        self.adc_endstop = adc_endstop
-        self.adc_endstop_oid = 0
-        if adc_endstop is not None:
-            self.adc_endstop_oid = adc_endstop.get_oid()
+        self.load_cell_endstop = load_cell_endstop
+        self.load_cell_endstop_oid = 0
+        if load_cell_endstop is not None:
+            self.load_cell_endstop_oid = load_cell_endstop.get_oid()
         # Setup mcu sensor_load_cell bulk query code
         self.mcu = mcu = self.sensor.get_spi().get_mcu()
         self.oid = oid = mcu.create_oid()
         spi_oid = self.sensor.get_spi().get_oid()
-        self.samples = None;
+        self.samples = None
         mcu.add_config_cmd("config_load_cell oid=%d spi_oid=%d \
-                            load_cell_sensor_type=%s adc_endstop_oid=%d"
+                            load_cell_sensor_type=%s load_cell_endstop_oid=%d"
             % (oid, spi_oid, self.sensor.get_capture_name()
-            , self.adc_endstop_oid))
+            , self.load_cell_endstop_oid))
         mcu.add_config_cmd(
             "query_load_cell oid=%d clock=0 rest_ticks=0 time_shift=0"
             % (oid,), on_restart=True)
@@ -209,9 +246,10 @@ class LoadCell:
         self.api_dump = motion_report.APIDumpHelper(
             self.printer, self._api_update, self._api_startstop, 0.100)
         self.name = config.get_name()
-        wh = self.printer.lookup_object('webhooks')
+        self.webhooks = wh = self.printer.lookup_object('webhooks')
         wh.register_mux_endpoint("load_cell/dump", "sensor", self.name,
                                  self._handle_dump_load_cell)
+        self.status = printer.lookup_object('load_cell_status')
     def _build_config(self):
         self.samples = LoadCellCaptureHelper(self.printer, self.sensor, self.oid)
     def _start_capture(self):
@@ -234,14 +272,16 @@ class LoadCell:
         else:
             self._stop_capture()
     def _api_update(self, eventtime):
-        samples, errors = self.samples.flush()
-        samples_str = ', '.join(str(s) for s in samples)
-        # DEBUG
-        #logging.info("Samples: %i, %s Errors: %i", len(samples), samples_str, errors)
-        return {'data': samples, 'errors': errors}
+        samples, errors, duplicates = self.samples.flush()
+        if len(samples) == 0 and errors == 0 and duplicates == 0:
+            return
+        record = {'samples': samples, 'errors': errors
+                    , 'duplicates': duplicates}
+        self.status._add_dump(record)
+        return record
     def _handle_dump_load_cell(self, web_request):
         self.api_dump.add_client(web_request)
-        hdr = ('time', 'volts')
+        hdr = ('time', 'raw', 'average', 'trend')
         web_request.send({'header': hdr})
     def start_internal_client(self):
         cconn = self.api_dump.add_internal_client()
@@ -251,9 +291,9 @@ def load_config(config):
     printer = config.get_printer()
     sensor = printer.lookup_object(config.get('sensor'))
     if config.getboolean('is_probe', default=False):
-        endstop = ADC_endstop(config, sensor)
-        config.get_printer().add_object('probe'
-                , PrinterProbe(config, endstop))
+        endstop = LoadCellEndstop(config, sensor)
+        printer.add_object('load_cell_status', LoadCellPrinterObject(config))
+        printer.add_object('load_cell_probe', PrinterProbe(config, endstop))
     return LoadCell(config, sensor, endstop)
 
 def load_config_prefix(config):

@@ -11,7 +11,7 @@
 #include "command.h" // DECL_COMMAND
 #include "sched.h" // DECL_TASK
 #include "spicmds.h" // spidev_transfer
-#include "adc_endstop.h" // adc_endstop_report_sample
+#include "load_cell_endstop.h" // load_cell_endstop_report_sample
 
 enum { CHIP_ADS1263, CHIP_ENUM_MAX };
 
@@ -28,17 +28,17 @@ enum {
 };
 
 #define MAX_SPI_READ_TIME timer_from_us(50)
-#define SAMPLE_WIDTH 5
+#define SAMPLE_WIDTH 13
 #define ERROR_WIDTH 2
 
 struct load_cell {
     struct timer timer;
     uint32_t rest_ticks;
     struct spidev_s *spi;
-    struct adc_endstop *adc_endstop;
+    struct load_cell_endstop *load_cell_endstop;
     uint16_t sequence;
     uint8_t flags, chip_type, data_count, time_shift, overflow;
-    uint8_t data[SAMPLE_WIDTH * 10];
+    uint8_t data[SAMPLE_WIDTH * 4];  // dont try to send anything larger than 64 bytes over the USB bus
 };
 
 static struct task_wake wake_load_cell;
@@ -72,16 +72,17 @@ command_config_load_cell(uint32_t *args)
     if (!spidev_have_cs_pin(lc->spi))
         shutdown("load cell sensor requires cs pin");
     lc->chip_type = chip_type;
-    uint8_t adc_endstop_oid = args[3];
-    // optional endstop to
-    if (adc_endstop_oid != 0) {
-        struct adc_endstop *ae = adc_endstop_oid_lookup(adc_endstop_oid);
-        lc->adc_endstop = ae;
+    uint8_t load_cell_endstop_oid = args[3];
+    // optional endstop
+    if (load_cell_endstop_oid != 0) {
+        struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(
+                                                        load_cell_endstop_oid);
+        lc->load_cell_endstop = lce;
     }
 }
 DECL_COMMAND(command_config_load_cell,
              "config_load_cell oid=%c spi_oid=%c load_cell_sensor_type=%c"
-             " adc_endstop_oid=%c");
+             " load_cell_endstop_oid=%c");
 
 // Report local measurement buffer
 static void
@@ -106,13 +107,25 @@ flush_if_full(struct load_cell *lc, uint8_t oid)
 // Add an entry to the measurement buffer
 static void
 append_load_cell_measurement(struct load_cell *lc, uint_fast8_t tcode
-                            , uint_fast32_t data)
+                            , uint_fast32_t data, int_fast32_t sample_avg
+                            , int_fast32_t trend_avg)
 {
     lc->data[lc->data_count] = tcode;
+    // raw adc counts
     lc->data[lc->data_count + 1] = data;
     lc->data[lc->data_count + 2] = data >> 8;
     lc->data[lc->data_count + 3] = data >> 16;
     lc->data[lc->data_count + 4] = data >> 24;
+    // sample filter average
+    lc->data[lc->data_count + 5] = sample_avg;
+    lc->data[lc->data_count + 6] = sample_avg >> 8;
+    lc->data[lc->data_count + 7] = sample_avg >> 16;
+    lc->data[lc->data_count + 8] = sample_avg >> 24;
+    // trend filter average
+    lc->data[lc->data_count + 9] = trend_avg;
+    lc->data[lc->data_count + 10] = trend_avg >> 8;
+    lc->data[lc->data_count + 11] = trend_avg >> 16;
+    lc->data[lc->data_count + 12] = trend_avg >> 24;
     lc->data_count += SAMPLE_WIDTH;
 }
 
@@ -124,8 +137,8 @@ add_load_cell_error(struct load_cell *lc, uint_fast8_t error_code)
     lc->data[lc->data_count + 1] = error_code;
     lc->data_count += ERROR_WIDTH;
     // endstop is optional, report if enabled
-    if (lc->adc_endstop) {
-        adc_endstop_report_error(lc->adc_endstop, error_code);
+    if (lc->load_cell_endstop) {
+        load_cell_endstop_report_error(lc->load_cell_endstop, error_code);
     }
 }
 
@@ -141,11 +154,14 @@ add_load_cell_data(struct load_cell *lc, uint32_t stime, uint32_t mtime
         add_load_cell_error(lc, SE_SCHEDULE);
         return;
     }
-    append_load_cell_measurement(lc, tdiff, sample);
+    int32_t sample_avg = -1, trend_avg = -1;
     // endstop is optional, report if enabled
-    if (lc->adc_endstop) {
-        adc_endstop_report_sample(lc->adc_endstop, sample, mtime);
-    }
+    if (lc->load_cell_endstop) {
+        load_cell_endstop_report_sample(lc->load_cell_endstop, sample, mtime);
+        sample_avg = load_cell_endstop_sample_avg(lc->load_cell_endstop);
+        trend_avg = load_cell_endstop_trend_avg(lc->load_cell_endstop);
+    } 
+    append_load_cell_measurement(lc, tdiff, sample, sample_avg, trend_avg);
 }
 
 // ads1263 sensor query
@@ -186,8 +202,8 @@ command_query_load_cell(uint32_t *args)
     lc->flags = 0;
     if (!args[2]) {
         // End measurements
-        if (lc->adc_endstop) {
-            adc_endstop_source_stopped(lc->adc_endstop);
+        if (lc->load_cell_endstop) {
+            load_cell_endstop_source_stopped(lc->load_cell_endstop);
         }
         if (lc->data_count)
             load_cell_report(lc, oid);
