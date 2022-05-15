@@ -256,6 +256,12 @@ class ADS1263CommandHelper:
         gcode.register_mux_command("DEBUG_WRITE_ADS1263", "CHIP", name,
             self.cmd_DEBUG_WRITE_ADS1263,
             desc=self.cmd_DEBUG_WRITE_ADS1263_help)
+    def _not_if_capturing(self, gcmd):
+        if (not self.chip.is_capturing):
+            return False
+        gcmd.respond_info("Opperation not allowed while sensor is capturing" \
+                            " data!")
+        return True
     cmd_DUMP_ADS1263_help = "Print all ADS1263 registers with descriptions"
     def cmd_DUMP_ADS1263(self, gcmd):
         val = self.chip.read_reg(REG_MIN_ADDRESS, REG_MAX_ADDRESS - 1)
@@ -263,9 +269,13 @@ class ADS1263CommandHelper:
         gcmd.respond_info("\n".join(out))
     cmd_RESET_ADS1263_help = "Send the RESET command"
     def cmd_RESET_ADS1263(self, gcmd):
+        if self._not_if_capturing(gcmd):
+            return
         self.chip.reset()
     cmd_CONFIGURE_ADS1263_help = "Configure settings of the ADS1263"
     def cmd_CONFIGURE_ADS1263(self, gcmd):
+        if self._not_if_capturing(gcmd):
+            return
         input = gcmd.get_int("INPUT", default=None, minval=0, maxval=4)
         rate = gcmd.get_int("RATE", default=None, minval=0, maxval=15)
         pga_enable = gcmd.get_int("PGA", default=None, minval=0, maxval=1)
@@ -281,16 +291,19 @@ class ADS1263CommandHelper:
             gcmd.respond_info(results)
     cmd_OFFSET_CALIBRATION_ADS1263_help = "Perform Offset Calibration"
     def cmd_OFFSET_CALIBRATION_ADS1263(self, gcmd):
+        if self._not_if_capturing(gcmd):
+            return
         self.chip.calibrate(CMD_SFOCAL1)
         val = self.chip.read_reg(REG_OFFSET_CAL, 3)
         gcmd.respond_info(REG_OFFSET_CAL.to_string(val))
     cmd_FULL_SCALE_CALIBRATION_ADS1263_help = "Perform Full Scale Calibration"
     def cmd_FULL_SCALE_CALIBRATION_ADS1263(self, gcmd):
+        if self._not_if_capturing(gcmd):
+            return
         self.chip.calibrate(CMD_SYGCAL1)
         val = self.chip.read_reg(REG_FULL_SCALE_CAL, 2)
         gcmd.respond_info(REG_FULL_SCALE_CAL.to_string(val))
     cmd_START_CAPTURE_ADS1263_help = "Start capturing samples"
-    #TODO: for start/stop, dissable these entierly if connected to a load cell
     def cmd_START_CAPTURE_ADS1263(self, gcmd):
         self.chip.start_capture()
     cmd_STOP_CAPTURE_ADS1263_help = "Stop capturing samples"
@@ -307,12 +320,14 @@ class ADS1263CommandHelper:
     cmd_DEBUG_WRITE_ADS1263_help = "Set a single ADS1263 register \
                                     (for debugging)"
     def cmd_DEBUG_WRITE_ADS1263(self, gcmd):
+        if self._not_if_capturing():
+            return
         reg = gcmd.get_int("REG", minval=0, maxval=26)
         val = gcmd.get_int("VAL", minval=0, maxval=255)
         self.chip.write_reg(reg, bytearray(val))
 
 # Printer class that controls ADS1263 chip
-class ADS1263(load_cell.LoadCellDataSource):
+class ADS1263(load_cell.LoadCellSensor):
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
@@ -320,6 +335,7 @@ class ADS1263(load_cell.LoadCellDataSource):
         self.spi = bus.MCU_SPI_from_config(config, 1, default_speed=8000000)
         self.mcu = self.spi.get_mcu()
         self.samples_per_second = 4 # default is 20SPS
+        self.is_capturing = False
         ADS1263CommandHelper(config, self)
         #TODO: when klipper restarts, always RESET the ADS_1263
     # LoadCellDataSource methods
@@ -331,10 +347,20 @@ class ADS1263(load_cell.LoadCellDataSource):
         return "ads1263"
     def get_samples_per_second(self):
         return SAMPLES_PER_S[self.samples_per_second]
+    def is_capturing(self):
+        return self.is_capturing
     def start_capture(self):
+        if (self.is_capturing):
+            return
         self.send_command(CMD_START1)
+        self.is_capturing = True
     def stop_capture(self):
+        if (not self.is_capturing):
+            return
         self.send_command(CMD_STOP1)
+        self.is_capturing = False
+    def samples_to_volts(self, samples):
+        return [0.0]
     def _wait(self, milliseconds = 10):
         systime = self.reactor.monotonic()
         print_time = self.mcu.estimated_print_time(systime)

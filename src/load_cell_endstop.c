@@ -11,6 +11,8 @@
 #include "sched.h" // shutdown
 #include "load_cell_endstop.h" //load_cell_endstop_report_sample
 
+const uint8_t DEFAULT_SAMPLE_COUNT = 2;
+
 // Flags
 enum { FLAG_IS_HOMING = 1 << 0, FLAG_IS_TRIGGERED = 1 << 1 };
 
@@ -67,18 +69,18 @@ int32_t load_cell_endstop_trend_avg(struct load_cell_endstop *lce)
 }
 
 static uint8_t
-is_flag_set(uint8_t flag, uint8_t flags)
+is_flag_set(uint8_t mask, uint8_t flags)
 {
-    return !!(flag & flags);
+    return !!(mask & flags);
 }
 
 static uint8_t
 set_flag(uint8_t mask, uint8_t value, uint8_t flags)
 {
-    if (!value) {
-        return flags |= mask;
+    if (value == 0) {
+        return flags &= ~mask;
     } else {
-        return flags &= mask;
+        return flags |= mask;
     }
 }
 
@@ -91,7 +93,7 @@ average(int32_t avg, int32_t input, int32_t index)
 void
 try_trigger(struct load_cell_endstop *lce, uint8_t is_homing)
 {
-    lce->flags = set_flag(lce->flags, FLAG_IS_TRIGGERED, 1);
+    lce->flags = set_flag(FLAG_IS_TRIGGERED, 1, lce->flags);
     if (is_homing) {
         trsync_do_trigger(lce->ts, lce->trigger_reason);
         // Disable further triggering
@@ -147,7 +149,7 @@ load_cell_endstop_report_sample(struct load_cell_endstop *lce, int32_t sample
     else if (!is_trigger && lce->trigger_count < lce->sample_count) {
         // any sample inside the deadband resets the trigger count
         lce->trigger_count = lce->sample_count;
-        lce->flags = set_flag(lce->flags, FLAG_IS_TRIGGERED, 0);
+        lce->flags = set_flag(FLAG_IS_TRIGGERED, 0, lce->flags);
         // if homing, also clear the trigger time
         if (is_homing) {
             lce->trigger_ticks = 0;
@@ -197,6 +199,9 @@ reset_endstop(struct load_cell_endstop *lce, uint32_t deadband
             , int32_t crash_min, int32_t crash_max, uint8_t sample_alpha
             , uint8_t trend_alpha, uint32_t settling_count)
 {
+    lce->flags = 0;
+    lce->trigger_count = lce->sample_count = DEFAULT_SAMPLE_COUNT;
+    lce->trigger_ticks = 0;
     lce->deadband = deadband;
     lce->crash_min = crash_min;
     lce->crash_max = crash_max;
@@ -206,7 +211,7 @@ reset_endstop(struct load_cell_endstop *lce, uint32_t deadband
     ema_filter_init_alpha(&(lce->trend_filter), trend_alpha);
 }
 
-// Create the Load Cell Endstop
+// Create a load_cell_endstop
 void
 command_config_load_cell_endstop(uint32_t *args)
 {
@@ -218,7 +223,7 @@ DECL_COMMAND(command_config_load_cell_endstop, "config_load_cell_endstop oid=%c"
     " deadband=%i crash_min=%i crash_max=%i sample_filter_alpha=%c"
     " trend_filter_alpha=%c settling_count=%i");
 
-// Lookup an load_cell_endstop
+// Lookup a load_cell_endstop
 struct load_cell_endstop *
 load_cell_endstop_oid_lookup(uint8_t oid)
 {
@@ -229,8 +234,7 @@ load_cell_endstop_oid_lookup(uint8_t oid)
 void
 command_reset_load_cell_endstop(uint32_t *args)
 {
-    struct load_cell_endstop *lce = oid_lookup(args[0]
-                                        , command_config_load_cell_endstop);
+    struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(args[0]);
     reset_endstop(lce, args[1], args[2], args[3], args[4], args[5], args[6]);
 }
 DECL_COMMAND(command_reset_load_cell_endstop, "reset_load_cell_endstop oid=%c"
@@ -241,19 +245,19 @@ DECL_COMMAND(command_reset_load_cell_endstop, "reset_load_cell_endstop oid=%c"
 void
 command_load_cell_endstop_home(uint32_t *args)
 {
-    struct load_cell_endstop *lce = oid_lookup(args[0]
-                                        , command_config_load_cell_endstop);
-    lce->ts = trsync_oid_lookup(args[1]);
-    lce->trigger_reason = args[2];
-    lce->sample_count = args[3];
-
-    if (!lce->sample_count) {
+    struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(args[0]);
+    // 0 samples indicates homing is finished
+    if (args[3] == 0) {
         // Disable end stop checking
         lce->ts = NULL;
         lce->flags = set_flag(FLAG_IS_HOMING, 0, lce->flags);
         return;
     }
+    lce->ts = trsync_oid_lookup(args[1]);
+    lce->trigger_reason = args[2];
+    lce->sample_count = args[3];
     lce->trigger_count = lce->sample_count;
+    lce->trigger_ticks = 0;
     lce->flags = set_flag(FLAG_IS_HOMING, 1, lce->flags);
 }
 DECL_COMMAND(command_load_cell_endstop_home,
@@ -264,15 +268,13 @@ void
 command_load_cell_endstop_query_state(uint32_t *args)
 {
     uint8_t oid = args[0];
-    struct load_cell_endstop *lce = oid_lookup(oid
-                                    , command_config_load_cell_endstop);
-
+    struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(args[0]);
     sendf("load_cell_endstop_state oid=%c homing=%c is_triggered=%c"
             " trigger_ticks=%u sample=%i ticks=%u sample_avg=%i trend_avg=%i"
-            , oid, is_flag_set(FLAG_IS_HOMING, lce->flags), lce->trigger_ticks
-            , is_flag_set(FLAG_IS_TRIGGERED, lce->flags), lce->last_sample
-            , lce->last_sample_ticks, lce->sample_filter.average
-            , lce->trend_filter.average);
+            , oid, is_flag_set(FLAG_IS_HOMING, lce->flags)
+            , is_flag_set(FLAG_IS_TRIGGERED, lce->flags), lce->trigger_ticks 
+            , lce->last_sample, lce->last_sample_ticks
+            , lce->sample_filter.average, lce->trend_filter.average);
 }
 DECL_COMMAND(command_load_cell_endstop_query_state
                 , "load_cell_endstop_query_state oid=%c");

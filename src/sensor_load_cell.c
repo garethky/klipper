@@ -72,12 +72,10 @@ command_config_load_cell(uint32_t *args)
     if (!spidev_have_cs_pin(lc->spi))
         shutdown("load cell sensor requires cs pin");
     lc->chip_type = chip_type;
-    uint8_t load_cell_endstop_oid = args[3];
+    uint8_t lce_oid = args[3];
     // optional endstop
-    if (load_cell_endstop_oid != 0) {
-        struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(
-                                                        load_cell_endstop_oid);
-        lc->load_cell_endstop = lce;
+    if (lce_oid != 0) {
+        lc->load_cell_endstop = load_cell_endstop_oid_lookup(lce_oid);;
     }
 }
 DECL_COMMAND(command_config_load_cell,
