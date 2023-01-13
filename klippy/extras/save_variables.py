@@ -39,8 +39,9 @@ class SaveVariables:
         value = gcmd.get('VALUE')
         try:
             value = ast.literal_eval(value)
-        except ValueError as e:
-            raise gcmd.error("Unable to parse '%s' as a literal" % (value,))
+        except (ValueError, SyntaxError) as e:
+            raise gcmd.error("Unable to parse '%s' as a Python literal"
+                                 % (value,))
         newvars = dict(self.allVariables)
         newvars[varname] = value
         # Write file
