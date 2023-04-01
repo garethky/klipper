@@ -12,11 +12,13 @@ Coord = collections.namedtuple('Coord', ('x', 'y', 'z', 'e'))
 
 class GCodeCommand:
     error = CommandError
-    def __init__(self, gcode, command, commandline, params, need_ack):
+    def __init__(self, gcode, command, commandline, params, need_ack,
+                 macro_stack=None):
         self._command = command
         self._commandline = commandline
         self._params = params
         self._need_ack = need_ack
+        self._macro_stack = macro_stack
         # Method wrappers
         self.respond_info = gcode.respond_info
         self.respond_raw = gcode.respond_raw
@@ -41,6 +43,8 @@ class GCodeCommand:
         if rawparams.startswith(' '):
             rawparams = rawparams[1:]
         return rawparams
+    def get_macro_stack(self):
+        return self._macro_stack
     def ack(self, msg=None):
         if not self._need_ack:
             return False
@@ -172,48 +176,57 @@ class GCodeDispatch:
         self._respond_state("Ready")
     # Parse input into commands
     args_r = re.compile('([A-Z_]+|[A-Z*/])')
+    def _process_single_command(self, line, need_ack=True, macro_stack=None):
+        # Ignore comments and leading/trailing spaces
+        line = origline = line.strip()
+        cpos = line.find(';')
+        if cpos >= 0:
+            line = line[:cpos]
+        # Break line into parts and determine command
+        parts = self.args_r.split(line.upper())
+        numparts = len(parts)
+        cmd = ""
+        if numparts >= 3 and parts[1] != 'N':
+            cmd = parts[1] + parts[2].strip()
+        elif numparts >= 5 and parts[1] == 'N':
+            # Skip line number at start of command
+            cmd = parts[3] + parts[4].strip()
+        # Build gcode "params" dictionary
+        params = { parts[i]: parts[i+1].strip()
+                    for i in range(1, numparts, 2) }
+        gcmd = GCodeCommand(self, cmd, origline, params, need_ack,
+                            macro_stack=macro_stack)
+        # Invoke handler for command
+        handler = self.gcode_handlers.get(cmd, self.cmd_default)
+        try:
+            handler(gcmd)
+        except self.error as e:
+            self._respond_error(str(e))
+            self.printer.send_event("gcode:command_error")
+            if not need_ack:
+                raise
+        except:
+            msg = 'Internal error on command:"%s"' % (cmd,)
+            logging.exception(msg)
+            self.printer.invoke_shutdown(msg)
+            self._respond_error(msg)
+            if not need_ack:
+                raise
+        gcmd.ack()
     def _process_commands(self, commands, need_ack=True):
         for line in commands:
-            # Ignore comments and leading/trailing spaces
-            line = origline = line.strip()
-            cpos = line.find(';')
-            if cpos >= 0:
-                line = line[:cpos]
-            # Break line into parts and determine command
-            parts = self.args_r.split(line.upper())
-            numparts = len(parts)
-            cmd = ""
-            if numparts >= 3 and parts[1] != 'N':
-                cmd = parts[1] + parts[2].strip()
-            elif numparts >= 5 and parts[1] == 'N':
-                # Skip line number at start of command
-                cmd = parts[3] + parts[4].strip()
-            # Build gcode "params" dictionary
-            params = { parts[i]: parts[i+1].strip()
-                       for i in range(1, numparts, 2) }
-            gcmd = GCodeCommand(self, cmd, origline, params, need_ack)
-            # Invoke handler for command
-            handler = self.gcode_handlers.get(cmd, self.cmd_default)
-            try:
-                handler(gcmd)
-            except self.error as e:
-                self._respond_error(str(e))
-                self.printer.send_event("gcode:command_error")
-                if not need_ack:
-                    raise
-            except:
-                msg = 'Internal error on command:"%s"' % (cmd,)
-                logging.exception(msg)
-                self.printer.invoke_shutdown(msg)
-                self._respond_error(msg)
-                if not need_ack:
-                    raise
-            gcmd.ack()
+            self._process_single_command(line, need_ack=need_ack,
+                                         macro_stack=None)
     def run_script_from_command(self, script):
         self._process_commands(script.split('\n'), need_ack=False)
     def run_script(self, script):
         with self.mutex:
             self._process_commands(script.split('\n'), need_ack=False)
+    # incremental macro handling is only supported for single commands
+    def run_single_command(self, command, macro_stack=None):
+        with self.mutex:
+            self._process_single_command(command, need_ack=False,
+                            macro_stack=macro_stack)
     def get_mutex(self):
         return self.mutex
     def create_gcode_command(self, command, commandline, params):

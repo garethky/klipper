@@ -106,6 +106,58 @@ class PrinterGCodeMacro:
 def load_config(config):
     return PrinterGCodeMacro(config)
 
+######################################################################
+# Incremental mode macro handling
+######################################################################
+class GCodeMacroStackEntry:
+    def __init__(self, macro, lines):
+        self._macro = macro
+        self._lines = lines.split('\n')
+    
+    def next_line(self):
+        return self._lines.pop()
+    
+    def has_next_line(self):
+        return len(self.lines) > 0
+    
+    def exit_script(self):
+        self._macro.exit_script()
+    
+    def dispose(self):
+        self.exit_script()
+        self._macro = None
+        self._lines.clear()
+
+class GCodeMacroStack:
+    def __init__(self, config):
+        self._stack = []
+        self.printer = printer = config.get_printer()
+        self.gcode = printer.lookup_object('gcode')
+
+    def push(self, macro, lines):
+        self._stack.append(GCodeMacroStackEntry(macro, lines))
+
+    def has_next(self):
+        return len(self._stack) > 0
+
+    def run_next(self):
+        if not self.has_next():
+            raise "GCodeMacroStack was empty!"
+        top_frame = self._stack[-1]
+        try:
+            line = top_frame.next_line()
+            self.gcode.run_single_command(line, macro_stack = self)
+            if not top_frame.has_next_line():
+                top_frame.dispose()
+                self._stack.pop()
+        except Exception as ex:
+            self.clear()
+            raise ex
+
+    def clear(self):
+        for frame in self._stack:
+            frame.dispose()
+        self._stack.clear()
 
 ######################################################################
 # GCode macro
@@ -174,6 +226,8 @@ class GCodeMacro:
         v = dict(self.variables)
         v[variable] = literal
         self.variables = v
+    def exit_script(self):
+        self.in_script = False
     def cmd(self, gcmd):
         if self.in_script:
             raise gcmd.error("Macro %s called recursively" % (self.alias,))
@@ -181,11 +235,15 @@ class GCodeMacro:
         kwparams.update(self.template.create_template_context())
         kwparams['params'] = gcmd.get_command_parameters()
         kwparams['rawparams'] = gcmd.get_raw_command_parameters()
+        macro_stack = gcmd.get_macro_stack()
         self.in_script = True
-        try:
-            self.template.run_gcode_from_command(kwparams)
-        finally:
-            self.in_script = False
+        if macro_stack:
+            macro_stack.push(self, self.template.render(kwparams))
+        else:
+            try:
+                self.template.run_gcode_from_command(kwparams)
+            finally:
+                self.in_script = False
 
 def load_config_prefix(config):
     return GCodeMacro(config)
