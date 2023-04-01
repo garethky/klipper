@@ -3,11 +3,11 @@
 # Copyright (C) 2022 Gareth Farrington <gareth@waves.ky>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging, math, threading, logging, struct
+import logging, threading, logging, struct
 from subprocess import call
+
 from probe import PrinterProbe
 from load_cell_endstop import LoadCellEndstop
-from . import bus, motion_report
 
 # TODO: move to some soft of logging utility
 # turn bytearrays into pretty hex strings: [0xff, 0x1]
@@ -21,6 +21,13 @@ def hexify(bytes):
 # * setup code for telling the MCU about the commands in C
 # * load_cell_endstop configuration?
 
+def average(data, points=None):
+        points = len(data) if points is None else points
+        avg = 0
+        for index in range(points):
+            logging.info("avg: %i" % (avg))
+            avg = avg + int((data[index] - avg) / (index + 1))
+        return avg
 
 # Interface for Sensors that want to supply data to run a Load Cell
 class LoadCellSensor:
@@ -79,7 +86,7 @@ class LoadCellCaptureHelper:
         self.last_angle = 0
         self.last_chip_mcu_clock = 0
         self.last_chip_clock = 0
-        self.oversample_rate = 1
+        self.oversample_rate = 1.
         self.static_delay = 0
         freq = mcu.seconds_to_clock(1.)
         while (float(TCODE_ERROR << self.time_shift) / freq) < 0.002:
@@ -132,7 +139,7 @@ class LoadCellCaptureHelper:
         value = struct.unpack_from('<i', b, offset=i)[0]
         # out = 0.0
         # TODO: do we want to return Volts or raw Counts??
-        # TODO: this conversion should be happenind only in the ADS1263 code, it cant be safe tot do it here as its sensor specific
+        # TODO: this conversion should be happening only in the ADS1263 code, it cant be safe to do it here as its sensor specific
         # TODO: Where do we get the reference voltage??
         #REF = 5.00
         #if (value >> 31 == 1):
@@ -187,7 +194,6 @@ class LoadCellCaptureHelper:
                         count += 1
             except Exception:
                 logging.info("Load Cell Samples threw an error: %s (%i) i: %i, e: %i, d: %i", hexify(d), data_len, i, error_count, duplicate_count)
-                raise
         self.last_sequence = last_sequence
         del samples[count:]
         return samples, error_count, duplicate_count
@@ -204,21 +210,46 @@ class LoadCellCommandHelper:
     def register_commands(self, name):
         # Register commands
         gcode = self.printer.lookup_object('gcode')
-        gcode.register_mux_command("LOAD_CELL_CAPTURE", "LOAD_CELL", name,
-                                   self.cmd_LOAD_CELL_CAPTURE,
-                                   desc=self.cmd_LOAD_CELL_CAPTURE_help)
-    cmd_LOAD_CELL_CAPTURE_help = "Start/stop Load Cell capture"
-    def cmd_LOAD_CELL_CAPTURE(self, gcmd):
-        bg_client = self.bg_client
-        if bg_client is None:
-            # Start measurements
-            self.bg_client = self.load_cell.start_internal_client()
+        gcode.register_mux_command("START_LOAD_CELL_CAPTURE", "LOAD_CELL", name,
+                                   self.cmd_START_LOAD_CELL_CAPTURE,
+                                   desc=self.cmd_START_LOAD_CELL_CAPTURE_help)
+        gcode.register_mux_command("STOP_LOAD_CELL_CAPTURE", "LOAD_CELL", name,
+                                   self.cmd_STOP_LOAD_CELL_CAPTURE,
+                                   desc=self.cmd_STOP_LOAD_CELL_CAPTURE_help)
+        gcode.register_mux_command("CONFIG_LOAD_CELL_CAPTURE", "LOAD_CELL",
+                                   name,
+                                   self.cmd_CONFIG_LOAD_CELL_CAPTURE,
+                                   desc=self.cmd_CONFIG_LOAD_CELL_CAPTURE_help)
+        gcode.register_mux_command("READ_LOAD_CELL", "LOAD_CELL",
+                                   name,
+                                   self.cmd_READ_LOAD_CELL,
+                                   desc=self.cmd_READ_LOAD_CELL_help)
+    cmd_START_LOAD_CELL_CAPTURE_help = "Start Load Cell capture"
+    def cmd_START_LOAD_CELL_CAPTURE(self, gcmd):
+        if self.load_cell.start_capture():
             gcmd.respond_info("Load Cell capture started")
-            return
-        # End measurements
-        self.bg_client = None
-        bg_client.finalize()  # is that all?
-        gcmd.respond_info("Load Cell capture stopped")
+        else:
+            raise self.printer.command_error("Load Cell is capturing")
+    cmd_STOP_LOAD_CELL_CAPTURE_help = "Start/stop Load Cell capture"
+    def cmd_STOP_LOAD_CELL_CAPTURE(self, gcmd):
+        if self.load_cell.stop_capture():
+            gcmd.respond_info("Load Cell capture stopped")
+        else:
+            raise self.printer.command_error("Load Cell capture not started")
+    cmd_CONFIG_LOAD_CELL_CAPTURE_help = "Change capture settings on the fly"
+    def cmd_CONFIG_LOAD_CELL_CAPTURE(self, gcmd):
+        report_rate = gcmd.get_int("REPORT_RATE", default=1, minval=1
+                                    , maxval=65535)
+        self.load_cell.set_report_rate(report_rate)
+    cmd_READ_LOAD_CELL_help = "Take a reading from the load cell"
+    def cmd_READ_LOAD_CELL(self, gcmd):
+        samples = self.load_cell.get_collector().collect(1000)
+        samples = [sample[1] for sample in samples]
+        min_sample = min(samples)
+        max_sample = max(samples)
+        sample_width = max_sample - min_sample
+        avg = average(samples)
+        gcmd.respond_info("Load Cell reading: average: %i, min: %i, max: %i, width: %i, samples: %i" % (avg, min_sample, max_sample, sample_width, len(samples)))
 
 # Utitity for GCode commands to easily collect some samples for analsys
 # blocks execution while collecting with reactor.pause()
@@ -226,8 +257,8 @@ class LoadCellSampleCollector(LoadCellSubscriber):
     def __init__(self, load_cell, reactor):
         self._load_cell = load_cell
         self._reactor = reactor
-        self.is_capturing = None # = load_cell.is_capturing()
-        self.sps = None # = load_cell.sensor.get_samples_per_second()
+        self.is_capturing = False
+        self.sps = 1
         self.samples = []
     def on_capture(self, samples):
         self.samples += samples
@@ -239,14 +270,17 @@ class LoadCellSampleCollector(LoadCellSubscriber):
         self._load_cell.subscribe(self)
         target = self.sps if samples == None else samples
         retry_delay = .1
+        timeout = self._reactor.monotonic() + 1. + (target / self.sps)
         while (len(self.samples) < target and self.is_capturing):
+            clock = self._reactor.monotonic()
+            if (clock > timeout):
+                break
             self._reactor.pause(self._reactor.monotonic() + retry_delay)
         self._load_cell.unsubscribe(self)
         self.samples = self.samples[:target]
         return self.samples
-    def callback(self, new_samples):
-        self.samples.append(new_samples)
 
+UPDATE_INTERVAL = .5
 # Printer class that controls ADS1263 chip
 class LoadCell:
     def __init__(self, config, sensor, load_cell_endstop):
@@ -271,61 +305,61 @@ class LoadCell:
             "query_load_cell oid=%d clock=0 rest_ticks=0 time_shift=0"
             % (oid,), on_restart=True)
         mcu.register_config_callback(self._build_config)
-        # API server endpoints
-        self.api_dump = motion_report.APIDumpHelper(
-            self.printer, self._api_update, self._api_startstop, 0.100)
         self.name = config.get_name()
-        self.webhooks = wh = self.printer.lookup_object('webhooks')
-        wh.register_mux_endpoint("load_cell/dump", "sensor", self.name,
-                                 self._handle_dump_load_cell)
+        self.update_timer = None
         self.dump = []
         self.subscribers = []
     def _build_config(self):
         self.samples = LoadCellCaptureHelper(self.printer, self.sensor, self.oid)
+        cmd_queue = self.sensor.get_spi().get_command_queue()
+        self._set_report_rate_cmd = self.mcu.lookup_command(
+            "set_load_cell_report_rate oid=%c report_rate=%u", cq=cmd_queue)
     def is_capturing(self):
         return self.samples.is_measuring()
     def sps(self):
         return self.sensor.get_samples_per_second()
-    def _start_capture(self):
+    def start_capture(self):
         if self.is_capturing():
-            return
+            return False
         logging.info("Starting load cell '%s' capture", self.name)
         self.sensor.start_capture()
         self.samples.start_capture()
+        self._start_timer()
         logging.info("Stared load cell '%s' capture", self.name)
         for subscriber in self.subscribers:
             subscriber.status(self.is_capturing(), self.sps())
-    def _stop_capture(self):
+        return True
+    def stop_capture(self):
         if not self.is_capturing():
-            return
+            return False
         logging.info("Stopping load cell '%s' capture", self.name)
-        self.sensor.stop_capture()
+        self._stop_timer()
         self.samples.stop_capture()
+        self.sensor.stop_capture()
         logging.info("Stopped load cell '%s' capture", self.name)
         for subscriber in self.subscribers:
             subscriber.status(self.is_capturing(), self.sps())
-    def _api_startstop(self, is_start):
-        if is_start:
-            self._start_capture()
-        else:
-            self._stop_capture()
-    def _api_update(self, eventtime):
+        return True
+    def _start_timer(self):
+        reactor = self.printer.get_reactor()
+        systime = reactor.monotonic()
+        waketime = systime + UPDATE_INTERVAL
+        self.update_timer = reactor.register_timer(self._update_subscribers, waketime)
+    def _stop_timer(self):
+        reactor = self.printer.get_reactor()
+        reactor.unregister_timer(self.update_timer)
+        self.update_timer = None
+    def _update_subscribers(self, eventtime):
         samples, errors, duplicates = self.samples.flush()
         if len(samples) == 0 and errors == 0 and duplicates == 0:
             return
-        record = {'samples': samples, 'errors': errors
-                    , 'duplicates': duplicates}
         self.dump.append(samples)
         for subscriber in self.subscribers:
             subscriber.on_capture(samples)
-        return record
-    def _handle_dump_load_cell(self, web_request):
-        self.api_dump.add_client(web_request)
-        hdr = ('time', 'raw', 'average', 'trend')
-        web_request.send({'header': hdr})
-    def start_internal_client(self):
-        cconn = self.api_dump.add_internal_client()
-        return cconn
+        return eventtime + UPDATE_INTERVAL
+    def set_report_rate(self, report_rate):
+        sample_rate = self.sps() / min(report_rate, self.sps())
+        self._set_report_rate_cmd.send([self.oid, sample_rate])
     def get_status(self, eventtime):
         dump_temp = self.dump
         self.dump = []
@@ -343,13 +377,14 @@ def load_config(config):
     printer = config.get_printer()
     sensor = printer.lookup_object(config.get('sensor'))
     name = config.get_name().split()
+    endstop = None
     if (len(name) == 2):
         name = " " + name[1]
     else:
         name = ""
     if config.getboolean('is_probe', default=False):
         endstop = LoadCellEndstop(config, sensor)
-        printer.add_object('load_cell_endstop' + name, endstop, )
+        printer.add_object('load_cell_endstop' + name, endstop)
         printer.add_object('load_cell_probe' + name, PrinterProbe(config, endstop))
     return LoadCell(config, sensor, endstop)
 

@@ -172,7 +172,9 @@ class PrinterProbe:
         positions = []
         while len(positions) < sample_count:
             # Probe position
+            logging.info("probe start")
             pos = self._probe(speed)
+            logging.info("probe complete")
             positions.append(pos)
             # Check samples tolerance
             z_positions = [p[2] for p in positions]
@@ -184,7 +186,9 @@ class PrinterProbe:
                 positions = []
             # Retract
             if len(positions) < sample_count:
+                logging.info("retract move start")
                 self._move(probexy + [pos[2] + sample_retract_dist], lift_speed)
+                logging.info("retract move complete")
         if must_notify_multi_probe:
             self.multi_probe_end()
         # Calculate and return result
@@ -227,11 +231,15 @@ class PrinterProbe:
         positions = []
         while len(positions) < sample_count:
             # Probe position
+            logging.info("probe start")
             pos = self._probe(speed)
+            logging.info("probe complete")
             positions.append(pos)
             # Retract
             liftpos = [None, None, pos[2] + sample_retract_dist]
+            logging.info("probe retract start")
             self._move(liftpos, lift_speed)
+            logging.info("probe retract complete")
         self.multi_probe_end()
         # Calculate maximum, minimum and average values
         max_value = max([p[2] for p in positions])

@@ -14,7 +14,8 @@
 const uint8_t DEFAULT_SAMPLE_COUNT = 2;
 
 // Flags
-enum { FLAG_IS_HOMING = 1 << 0, FLAG_IS_TRIGGERED = 1 << 1 };
+enum { FLAG_IS_HOMING = 1 << 0, FLAG_IS_TRIGGERED = 1 << 1
+    , FLAG_IS_HOMING_TRIGGER = 1 << 2 };
 
 // Exponential Moving Average Filter
 struct ema_filter {
@@ -51,7 +52,8 @@ ema_filter_update(struct ema_filter *ef, int32_t sample)
 
 // Endstop Structure
 struct load_cell_endstop {
-    uint32_t trigger_ticks, last_sample_ticks, deadband, settling_count;
+    uint32_t trigger_ticks, last_sample_ticks, deadband, settling_count,
+            deadband_count;
     int32_t last_sample, crash_max, crash_min, settling_average, settling_index;
     uint8_t flags, trigger_count, trigger_reason, sample_count;
     struct trsync *ts;
@@ -91,13 +93,19 @@ average(int32_t avg, int32_t input, int32_t index)
 }
 
 void
-try_trigger(struct load_cell_endstop *lce, uint8_t is_homing)
+try_trigger(struct load_cell_endstop *lce)
 {
+    // this flag tracks the "real time" trigger state
     lce->flags = set_flag(FLAG_IS_TRIGGERED, 1, lce->flags);
-    if (is_homing) {
+
+    // this flag latches until a reset
+    uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce->flags);
+    uint8_t is_not_triggered = !is_flag_set(FLAG_IS_HOMING_TRIGGER, lce->flags);
+    if (is_homing && is_not_triggered) {
         trsync_do_trigger(lce->ts, lce->trigger_reason);
         // Disable further triggering
-        lce->flags = set_flag(FLAG_IS_HOMING, 0, lce->flags);
+        lce->flags = set_flag(FLAG_IS_HOMING_TRIGGER, 1, lce->flags);
+        //lce->flags = set_flag(FLAG_IS_HOMING, 0, lce->flags);
     }
 }
 
@@ -119,43 +127,17 @@ load_cell_endstop_report_sample(struct load_cell_endstop *lce, int32_t sample
         lce->settling_average = 0;
     }
 
-    // Update filter and get averages:
+    // Update sample filter
     int32_t sample_avg = ema_filter_update(&(lce->sample_filter), sample);
-    int32_t trend_avg = lce->trend_filter.average;
 
     // check for a crash and immediatly trigger
-    uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce->flags);
-    uint8_t is_crash =  (sample_avg > lce->crash_max)
+    uint8_t is_crash = (sample_avg > lce->crash_max)
                         || (sample_avg < lce->crash_min);
-    uint8_t is_trigger = (sample_avg > (trend_avg + lce->deadband))
-                        || (sample_avg < (trend_avg - lce->deadband));
-    
-    // always trigger for a suspected crash
     if (is_crash) {
-        try_trigger(lce, is_homing);
+        try_trigger(lce);
+        return;
     }
-    // otherwise trigger if not settling
-    else if (!is_settling && is_trigger && lce->trigger_count > 0) {
-        // the first triggering sample sets the trigger time
-        if (is_homing && lce->trigger_count == lce->sample_count) {
-            lce->trigger_ticks = ticks;
-        }
-        lce->trigger_count -= 1;
 
-        if (lce->trigger_count == 0) {
-            try_trigger(lce, is_homing);
-        }
-    }
-    else if (!is_trigger && lce->trigger_count < lce->sample_count) {
-        // any sample inside the deadband resets the trigger count
-        lce->trigger_count = lce->sample_count;
-        lce->flags = set_flag(FLAG_IS_TRIGGERED, 0, lce->flags);
-        // if homing, also clear the trigger time
-        if (is_homing) {
-            lce->trigger_ticks = 0;
-        }
-    }
-    
     // continue settling
     if (is_settling) {
         lce->settling_average = average(lce->settling_average, sample
@@ -164,10 +146,50 @@ load_cell_endstop_report_sample(struct load_cell_endstop *lce, int32_t sample
         // during setting, keep updating the trend filter so the
         // settling process is observable as the trend_filter average
         ema_filter_init_setpoint(&(lce->trend_filter), lce->settling_average);
+        return;
     }
-    else if (!is_trigger) {
-        // Only update trend filter with non-trigger points
-        trend_avg = ema_filter_update(&(lce->trend_filter), sample);
+
+    int32_t trend_avg = lce->trend_filter.average;
+    uint8_t is_trigger = (sample_avg > (trend_avg + lce->deadband))
+                        || (sample_avg < (trend_avg - lce->deadband));
+    uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce->flags);
+    uint8_t is_homing_triggered = is_flag_set(FLAG_IS_HOMING_TRIGGER,
+                                            lce->flags);
+    
+    // update the deadband_count
+    if (!is_trigger && lce->deadband_count < lce->settling_count) {
+        lce->deadband_count += 1;
+    } else if (is_trigger) {
+        lce->deadband_count = 0;
+    }
+
+    // Update trend filter with non-trigger points only
+    if (!is_trigger && !is_homing_triggered 
+        && lce->deadband_count == lce->settling_count) {
+        ema_filter_update(&(lce->trend_filter), sample);
+    }
+
+    // update trigger state
+    if (is_trigger && lce->trigger_count > 0) {
+        // the first triggering sample when homing sets the trigger time
+        if (is_homing && !is_homing_triggered 
+                && lce->trigger_count == lce->sample_count) {
+            lce->trigger_ticks = ticks;
+        }
+
+        lce->trigger_count -= 1;
+        if (lce->trigger_count == 0) {
+            try_trigger(lce);
+        }
+    }
+    else if (!is_trigger && lce->trigger_count < lce->sample_count) {
+        // any sample inside the deadband resets the trigger count
+        lce->trigger_count = lce->sample_count;
+        lce->flags = set_flag(FLAG_IS_TRIGGERED, 0, lce->flags);
+        // if homing, but not yet triggered, clear the trigger time
+        if (is_homing && !is_homing_triggered) {
+            lce->trigger_ticks = 0;
+        }
     }
 }
 
@@ -176,10 +198,25 @@ load_cell_endstop_report_error(struct load_cell_endstop *lce, uint8_t error_code
 {
     uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce->flags);
     if (is_homing) {
-        // ATTENTION: is this good form or should we _only_ call shutdown() ?
-        //how do we log the error in such a way that the user is sure to see it?
-        trsync_do_trigger(lce->ts, lce->trigger_reason);
-        shutdown("load_cell_endstop: Sensor reported an error while homing");
+        if (error_code == 0) {
+            shutdown("load_cell_endstop: Sensor reported an error while homing: SE_OVERFLOW");
+        }
+        else if (error_code == 1) {
+            shutdown("load_cell_endstop: Sensor reported an error while homing: SE_SCHEDULE");
+        }
+        else if (error_code == 2) {
+            shutdown("load_cell_endstop: Sensor reported an error while homing: SE_SPI_TIME");
+        }
+        else if (error_code == 3) {
+            shutdown("load_cell_endstop: Sensor reported an error while homing: SE_CRC");
+        }
+        // TODO: clean this up so its a reference to SE_DUPELICATE
+        else if (error_code == 4) {
+            return;
+        }
+        else {
+            shutdown("load_cell_endstop: Sensor reported an error while homing: UNKNOWN");
+        }
     }
 }
 
@@ -188,8 +225,6 @@ load_cell_endstop_source_stopped(struct load_cell_endstop *lce)
 {
     uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce->flags);
     if (is_homing) {
-        // ATTENTION: is this good form or should we _only_ call shutdown() ?
-        trsync_do_trigger(lce->ts, lce->trigger_reason);
         shutdown("load_cell_endstop: Sensor stopped sending data while homing");
     }
 }
@@ -206,6 +241,7 @@ reset_endstop(struct load_cell_endstop *lce, uint32_t deadband
     lce->crash_min = crash_min;
     lce->crash_max = crash_max;
     lce->settling_count = settling_count > 1 ? settling_count : 1;
+    lce->deadband_count = settling_count;
     lce->settling_index = lce->settling_average = 0;
     ema_filter_init_alpha(&(lce->sample_filter), sample_alpha);
     ema_filter_init_alpha(&(lce->trend_filter), trend_alpha);
@@ -246,6 +282,8 @@ void
 command_load_cell_endstop_home(uint32_t *args)
 {
     struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(args[0]);
+    lce->trigger_ticks = 0;
+    lce->flags = set_flag(FLAG_IS_TRIGGERED, 0, lce->flags);
     // 0 samples indicates homing is finished
     if (args[3] == 0) {
         // Disable end stop checking
@@ -257,7 +295,6 @@ command_load_cell_endstop_home(uint32_t *args)
     lce->trigger_reason = args[2];
     lce->sample_count = args[3];
     lce->trigger_count = lce->sample_count;
-    lce->trigger_ticks = 0;
     lce->flags = set_flag(FLAG_IS_HOMING, 1, lce->flags);
 }
 DECL_COMMAND(command_load_cell_endstop_home,
@@ -269,9 +306,11 @@ command_load_cell_endstop_query_state(uint32_t *args)
 {
     uint8_t oid = args[0];
     struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(args[0]);
-    sendf("load_cell_endstop_state oid=%c homing=%c is_triggered=%c"
-            " trigger_ticks=%u sample=%i ticks=%u sample_avg=%i trend_avg=%i"
+    sendf("load_cell_endstop_state oid=%c homing=%c homing_triggered=%c "
+        "is_triggered=%c trigger_ticks=%u sample=%i ticks=%u sample_avg=%i "
+        "trend_avg=%i"
             , oid, is_flag_set(FLAG_IS_HOMING, lce->flags)
+            , is_flag_set(FLAG_IS_HOMING_TRIGGER, lce->flags)
             , is_flag_set(FLAG_IS_TRIGGERED, lce->flags), lce->trigger_ticks 
             , lce->last_sample, lce->last_sample_ticks
             , lce->sample_filter.average, lce->trend_filter.average);

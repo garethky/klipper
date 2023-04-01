@@ -9,15 +9,29 @@ class LoadCellEndstopCalibrator:
         self._load_cell = load_cell
         self._lc_endstop = lc_endstop
         self._collector = self._load_cell.get_collector()
-        self.name = config.get_name().split()[-1]
-        self.register_commands(self.name)
+        name = config.get_name()
+        self.register_commands(name)
+        if name == "load_cell":
+            self.register_commands(None)
     def register_commands(self, name):
         gcode = self._printer.lookup_object('gcode')
-        gcode.register_mux_command("LOAD_CELL_ENDSTOP_CALIBRATE", "LOAD_CELL",
-                            name, self.cmd_LOAD_CELL_ENDSTOP_CALIBRATE,
-                            desc=self.cmd_LOAD_CELL_ENDSTOP_CALIBRATE_help)
-    cmd_LOAD_CELL_ENDSTOP_CALIBRATE_help = "Calibrate Load Cell Endstop"
-    def cmd_LOAD_CELL_ENDSTOP_CALIBRATE(self, gcmd):
+        gcode.register_mux_command("CALIBRATE_LOAD_CELL_ENDSTOP", 
+                            "LOAD_CELL_ENDSTOP",
+                            name, self.cmd_CALIBRATE_LOAD_CELL_ENDSTOP,
+                            desc=self.cmd_CALIBRATE_LOAD_CELL_ENDSTOP_help)
+        gcode.register_mux_command("RESET_LOAD_CELL_ENDSTOP",
+                            "LOAD_CELL_ENDSTOP",
+                            name, self.cmd_RESET_LOAD_CELL_ENDSTOP,
+                            desc=self.cmd_RESET_LOAD_CELL_ENDSTOP_help)
+        gcode.register_mux_command("CONFIGURE_LOAD_CELL_ENDSTOP", "LOAD_CELL_ENDSTOP",
+                            name, self.cmd_CONFIGURE_LOAD_CELL_ENDSTOP,
+                            desc=self.cmd_CONFIGURE_LOAD_CELL_ENDSTOP_help)
+    cmd_RESET_LOAD_CELL_ENDSTOP_help = "Reset Load Cell Endstop"
+    def cmd_RESET_LOAD_CELL_ENDSTOP(self, gcmd):
+        self._lc_endstop.reset()
+        return
+    cmd_CALIBRATE_LOAD_CELL_ENDSTOP_help = "Calibrate Load Cell Endstop"
+    def cmd_CALIBRATE_LOAD_CELL_ENDSTOP(self, gcmd):
         # if 1, apply the settings immediatly
         apply_settings = gcmd.get_int("APPLY", default=0, minval=0, maxval=1)
         # the default is 1 seconds worth of samples at whatever the sample rate
@@ -29,7 +43,7 @@ class LoadCellEndstopCalibrator:
         sample_smoothing = gcmd.get_int("SAMPLE_SMOOTHING", default=25,
                         minval=5, maxval=100)
         # Deadband will be +/- 10% larger than the sample width
-        deadband_gap = gcmd.get_int("DEADBAND_GAP", default=50, minval=1,
+        deadband_gap = gcmd.get_int("DEADBAND_GAP", default=25, minval=1,
                         maxval=200)
         # Over 1 second, what is the maximum allowed change in the deadband
         # centerline value as a % of the width of the deadband.
@@ -40,9 +54,8 @@ class LoadCellEndstopCalibrator:
         # sample - sample width
         crash_gap = gcmd.get_int("CRASH_GAP", default=5, minval=1, maxval=100)
         
-        if (not self._load_cell.is_capturing()):
-            gcmd.error("Calibration aborted: load cell not capturing")
-            return
+        if not self._load_cell.is_capturing():
+            raise self._printer.command_error("Load Cell not capturing")
         sample_count = self._load_cell.sps() * sample_seconds
         samples = self._collector.collect(sample_count)
         samples = [sample[1] for sample in samples]
@@ -52,14 +65,19 @@ class LoadCellEndstopCalibrator:
         " Settling Count: %i" % results)
         if apply_settings:
             self._lc_endstop.reset_config(*results)
+    cmd_CONFIGURE_LOAD_CELL_ENDSTOP_help = "Configure Load Cell Endstop"
+    def cmd_CONFIGURE_LOAD_CELL_ENDSTOP(self, gcmd):
+        # TODO implement changing of all settings here
+        pass
     def calibrate(self, samples, sample_smoothing, deadband_gap, trend_rate, 
                     crash_gap):
         deadband = sample_alpha = trend_alpha = settling_count = 0
         crash_min = crash_max = 0
 
+        sps = self._load_cell.sps()
         sample_width = self._width(samples)
         sample_avg = self._avg(samples)
-        sample_seconds = float(len(samples)) / float(self._load_cell.sps())
+        sample_seconds = float(len(samples)) / float(sps)
         logging.info("sample width: %i sample average: %i" % (sample_width, sample_avg))
         crash_max = int(sample_avg + (sample_width * crash_gap))
         crash_min = int(sample_avg - (sample_width * crash_gap))
@@ -85,11 +103,12 @@ class LoadCellEndstopCalibrator:
             trend_delta = self._ema(deadband_samples, trend_alpha, 0)[-1]
             logging.info("trend delta: %i" % (trend_delta))
         
-        settling_count = 1  # means the minimum value is at least 2!
-        settling_avg = sample_avg + sample_width
-        while abs(sample_avg - settling_avg) > (sample_width * 0.01):
-            settling_count += 1
-            settling_avg = self._avg(samples, settling_count)
+        #settling_count = 1  # means the minimum value is at least 2!
+        #settling_avg = sample_avg + sample_width
+        #while abs(sample_avg - settling_avg) > (sample_width * 0.01):
+        #    settling_count += 1
+        #    settling_avg = self._avg(samples, settling_count)
+        settling_count = min(sps, 100)
 
         return (deadband, crash_min, crash_max, sample_alpha, trend_alpha
                 , settling_count)
@@ -119,13 +138,14 @@ class LoadCellEndstopCalibrator:
             ema_data.append(int(average))
         return ema_data
 
-DEFAULT_SAMPLE_COUNT = 2
+DEFAULT_SAMPLE_COUNT = 4
 #LoadCellEndstop implements mcu_endstop
 class LoadCellEndstop:
     def __init__(self, config, sensor):
         self._config = config
         self._config_name = config.get_name()
         self._printer = printer = config.get_printer()
+        self.gcode = printer.lookup_object('gcode')
         printer.register_event_handler('klippy:mcu_identify',
                                         self.handle_mcu_identify)
         self._mcu = mcu = sensor.get_mcu()
@@ -149,6 +169,8 @@ class LoadCellEndstop:
             , minval=1, maxval=31)
         self.settling_count = config.getint("settling_count", default=100
             , minval=1, maxval=sys.maxint)
+        self.triggering_samples = config.getint("triggering_samples", default=DEFAULT_SAMPLE_COUNT
+            , minval=1, maxval=5)
         if self.crash_min > self.crash_max:
             "Crash minimum must be less than crash maximum"
         self._mcu.add_config_cmd("config_load_cell_endstop oid=%d deadband=%d "\
@@ -165,8 +187,9 @@ class LoadCellEndstop:
         cmd_queue = self._trsyncs[0].get_command_queue()
         self._query_cmd = self._mcu.lookup_query_command(
             "load_cell_endstop_query_state oid=%c", "load_cell_endstop_state " \
-            "oid=%c homing=%c is_triggered=%c trigger_ticks=%u sample=%i " \
-            "ticks=%u sample_avg=%i trend_avg=%i", oid=self._oid, cq=cmd_queue)
+            "oid=%c homing=%c homing_triggered=%c is_triggered=%c " \
+            "trigger_ticks=%u sample=%i ticks=%u sample_avg=%i trend_avg=%i",
+            oid=self._oid, cq=cmd_queue)
         self._reset_cmd = self._mcu.lookup_command(
             "reset_load_cell_endstop oid=%c deadband=%i crash_min=%i " \
             "crash_max=%i sample_filter_alpha=%c trend_filter_alpha=%c " \
@@ -198,6 +221,10 @@ class LoadCellEndstop:
         self._reset_cmd.send([self._oid, self.deadband, self.crash_min
             , self.crash_max, self.setpoint_alpha, self.trend_alpha
             , self.settling_count])
+        pause_time = float(self.settling_count) * (1. / self._load_cell.sps())
+        reactor = self._mcu.get_printer().get_reactor()
+        reactor.pause(reactor.monotonic() + pause_time)
+        logging.info("LCE: reset")
     def reset_config(self, deadband, crash_min, crash_max, setpoint_alpha
                         , trend_alpha, settling_count):
         self.deadband = deadband
@@ -255,6 +282,7 @@ class LoadCellEndstop:
         ffi_main, ffi_lib = chelper.get_ffi()
         ffi_lib.trdispatch_start(self._trdispatch, etrsync.REASON_HOST_REQUEST)
         # duplicode end
+        logging.info("load cell endstop: START HOMING")
         self._home_cmd.send([self._oid, etrsync.get_oid()
             , etrsync.REASON_ENDSTOP_HIT, DEFAULT_SAMPLE_COUNT]
             , reqclock=clock)
@@ -283,18 +311,35 @@ class LoadCellEndstop:
         trigger_t = self._mcu.clock_to_print_time(next_clock - self._rest_ticks)
         return trigger_t
     def query_endstop(self, print_time):
+        if not self._load_cell.is_capturing():
+            raise self._printer.command_error("Load Cell not capturing")
+        # TODO: if not sampling throw an error, maybe even shutdown
         clock = self._mcu.print_time_to_clock(print_time)
         if self._mcu.is_fileoutput():
             return 0
         params = self._query_cmd.send([self._oid], minclock=clock)
-        # TODO: if the time since last sample is larger than the sample interval
-        # throw an error because the endstop is not being fed fresh data
-        return params['is_triggered'] == 1
+        logging.info("load_cell_endstop_state oid=%u homing=%u homing_triggered=%u is_triggered=%u trigger_ticks=%u sample=%i ticks=%u sample_avg=%i trend_avg=%i", params['oid'], params['homing'], params['homing_triggered'], params['is_triggered'], params['trigger_ticks'], params['sample'], params['ticks'], params['sample_avg'], params['trend_avg'])
+        if params['homing'] == 1:
+            return params['homing_triggered'] == 1
+        else:
+            return params['is_triggered'] == 1
     def multi_probe_begin(self):
-        pass
+        # Before beginning probing, make sure any retract moves have completed
+        # this makes sure the retract happens before the trsync gets armed
+        toolhead = self._printer.lookup_object('toolhead')
+        toolhead.dwell(0.1)
+        toolhead.wait_moves()
+        #self.gcode.run_script_from_command("QUERY_PROBE")
     def multi_probe_end(self):
+        #self.gcode.run_script_from_command("QUERY_PROBE")
         pass
     def probe_prepare(self, hmove):
-        pass
+        # Before beginning probing, make sure any retract moves have completed
+        # this makes sure the retract happens before the trsync gets armed
+        toolhead = self._printer.lookup_object('toolhead')
+        toolhead.dwell(0.1)
+        toolhead.wait_moves()
+        #self.gcode.run_script_from_command("QUERY_PROBE")
     def probe_finish(self, hmove):
+        #self.gcode.run_script_from_command("QUERY_PROBE")
         pass

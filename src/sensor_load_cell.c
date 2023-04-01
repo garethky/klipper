@@ -33,12 +33,12 @@ enum {
 
 struct load_cell {
     struct timer timer;
-    uint32_t rest_ticks;
+    uint32_t rest_ticks, report_rate, report_counter;
     struct spidev_s *spi;
     struct load_cell_endstop *load_cell_endstop;
     uint16_t sequence;
     uint8_t flags, chip_type, data_count, time_shift, overflow;
-    uint8_t data[SAMPLE_WIDTH * 4];  // dont try to send anything larger than 64 bytes over the USB bus
+    uint8_t data[SAMPLE_WIDTH * 3];  // dont try to send anything larger than 64 bytes over the USB bus
 };
 
 static struct task_wake wake_load_cell;
@@ -81,6 +81,16 @@ command_config_load_cell(uint32_t *args)
 DECL_COMMAND(command_config_load_cell,
              "config_load_cell oid=%c spi_oid=%c load_cell_sensor_type=%c"
              " load_cell_endstop_oid=%c");
+
+// Change the report rate
+void
+command_set_load_cell_report_rate(uint32_t *args)
+{
+    struct load_cell *lc = oid_lookup(args[0], command_config_load_cell);
+    lc->report_rate = args[1];
+}
+DECL_COMMAND(command_set_load_cell_report_rate,
+            "set_load_cell_report_rate oid=%c report_rate=%u");
 
 // Report local measurement buffer
 static void
@@ -129,15 +139,26 @@ append_load_cell_measurement(struct load_cell *lc, uint_fast8_t tcode
 
 // Add an error indicator to the measurement buffer
 static void
-add_load_cell_error(struct load_cell *lc, uint_fast8_t error_code)
+add_load_cell_error(struct load_cell *lc, uint8_t error_code)
 {
-    lc->data[lc->data_count] = TCODE_ERROR;
-    lc->data[lc->data_count + 1] = error_code;
-    lc->data_count += ERROR_WIDTH;
     // endstop is optional, report if enabled
     if (lc->load_cell_endstop) {
         load_cell_endstop_report_error(lc->load_cell_endstop, error_code);
     }
+
+    // count duplicates like regular data reports
+    if (error_code == SE_DUPELICATE) {
+        lc->report_counter += 1;
+        // send sampled duplicate reports only
+        if (lc->report_counter < lc->report_rate) {
+            return;
+        }
+        lc->report_counter = 0;
+    }
+
+    lc->data[lc->data_count] = TCODE_ERROR;
+    lc->data[lc->data_count + 1] = error_code;
+    lc->data_count += ERROR_WIDTH;
 }
 
 // Add a measurement to the buffer
@@ -158,8 +179,13 @@ add_load_cell_data(struct load_cell *lc, uint32_t stime, uint32_t mtime
         load_cell_endstop_report_sample(lc->load_cell_endstop, sample, mtime);
         sample_avg = load_cell_endstop_sample_avg(lc->load_cell_endstop);
         trend_avg = load_cell_endstop_trend_avg(lc->load_cell_endstop);
-    } 
-    append_load_cell_measurement(lc, tdiff, sample, sample_avg, trend_avg);
+    }
+
+    lc->report_counter += 1;
+    if (lc->report_counter >= lc->report_rate) {
+        append_load_cell_measurement(lc, tdiff, sample, sample_avg, trend_avg);
+        lc->report_counter = 0;
+    }
 }
 
 // ads1263 sensor query
@@ -211,9 +237,11 @@ command_query_load_cell(uint32_t *args)
     // Start new measurements query
     lc->timer.waketime = args[1];
     lc->rest_ticks = args[2];
-    lc->sequence = 0;
-    lc->data_count = 0;
     lc->time_shift = args[3];
+    lc->sequence = 0;
+    lc->report_counter = 0;
+    lc->data_count = 0;
+
     sched_add_timer(&lc->timer);
 }
 DECL_COMMAND(command_query_load_cell,

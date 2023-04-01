@@ -259,9 +259,8 @@ class ADS1263CommandHelper:
     def _not_if_capturing(self, gcmd):
         if (not self.chip.is_capturing):
             return False
-        gcmd.respond_info("Opperation not allowed while sensor is capturing" \
-                            " data!")
-        return True
+        raise self.printer.command_error("Opperation not allowed while sensor \
+            is capturing data!")
     cmd_DUMP_ADS1263_help = "Print all ADS1263 registers with descriptions"
     def cmd_DUMP_ADS1263(self, gcmd):
         val = self.chip.read_reg(REG_MIN_ADDRESS, REG_MAX_ADDRESS - 1)
@@ -294,20 +293,24 @@ class ADS1263CommandHelper:
         if self._not_if_capturing(gcmd):
             return
         self.chip.calibrate(CMD_SFOCAL1)
-        val = self.chip.read_reg(REG_OFFSET_CAL, 3)
+        val = REG_OFFSET_CAL.read(self.chip)
         gcmd.respond_info(REG_OFFSET_CAL.to_string(val))
     cmd_FULL_SCALE_CALIBRATION_ADS1263_help = "Perform Full Scale Calibration"
     def cmd_FULL_SCALE_CALIBRATION_ADS1263(self, gcmd):
         if self._not_if_capturing(gcmd):
             return
         self.chip.calibrate(CMD_SYGCAL1)
-        val = self.chip.read_reg(REG_FULL_SCALE_CAL, 2)
+        val = REG_FULL_SCALE_CAL.read(self.chip)
         gcmd.respond_info(REG_FULL_SCALE_CAL.to_string(val))
     cmd_START_CAPTURE_ADS1263_help = "Start capturing samples"
     def cmd_START_CAPTURE_ADS1263(self, gcmd):
+        if self._not_if_capturing(gcmd):
+            return
         self.chip.start_capture()
     cmd_STOP_CAPTURE_ADS1263_help = "Stop capturing samples"
     def cmd_STOP_CAPTURE_ADS1263(self, gcmd):
+        if self._not_if_capturing(gcmd):
+            return
         self.chip.stop_capture()
     cmd_DEBUG_READ_ADS1263_help = "Query ADS1263 registers (for debugging)"
     def cmd_DEBUG_READ_ADS1263(self, gcmd):
@@ -332,7 +335,7 @@ class ADS1263(load_cell.LoadCellSensor):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         # Setup SPI communications on the MCU hosting the sensor
-        self.spi = bus.MCU_SPI_from_config(config, 1, default_speed=8000000)
+        self.spi = bus.MCU_SPI_from_config(config, 1, default_speed=25000000)
         self.mcu = self.spi.get_mcu()
         self.samples_per_second = 4 # default is 20SPS
         self.is_capturing = False
@@ -369,7 +372,7 @@ class ADS1263(load_cell.LoadCellSensor):
         self.stop_capture()
         self.send_command(CMD_RESET)
         self._wait(RESET_DELAY_MS)
-    def _calibration_delay_ms(data_rate_index, delay_index):
+    def _calibration_delay_ms(self, data_rate_index, delay_index):
         delay_ms = CONVERSION_DELAY_TIME_MS[delay_index]
         time_per_sample = math.ceil(1000 / SAMPLES_PER_S[data_rate_index])
         return delay_ms + (time_per_sample * 16)
