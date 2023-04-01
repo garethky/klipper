@@ -30,7 +30,7 @@ class VirtualSD:
         self.on_error_gcode = gcode_macro.load_template(
             config, 'on_error_gcode', '')
         # incremental macro stack
-        self.macro_stack = GCodeMacroStack()
+        self.macro_stack = GCodeMacroStack(config)
         # Register commands
         self.gcode = self.printer.lookup_object('gcode')
         for cmd in ['M20', 'M21', 'M23', 'M24', 'M25', 'M26', 'M27']:
@@ -235,6 +235,24 @@ class VirtualSD:
         lines = []
         error_message = None
         while not self.must_pause_work:
+            # Dispatch all macro commands before moving to the next line
+            if self.macro_stack.has_next():
+                logging.info("In macro execution SD card print")
+                self.cmd_from_sd = True
+                try:
+                    self.macro_stack.run_next()
+                    self.cmd_from_sd = False
+                    continue
+                except self.gcode.error as e:
+                    error_message = str(e)
+                    try:
+                        self.gcode.run_script(self.on_error_gcode.render())
+                    except:
+                        logging.exception("virtual_sdcard on_error")
+                    break
+                except:
+                    logging.exception("virtual_sdcard dispatch")
+                    break
             if not lines:
                 # Read more data
                 try:
@@ -259,23 +277,6 @@ class VirtualSD:
             if gcode_mutex.test():
                 self.reactor.pause(self.reactor.monotonic() + 0.100)
                 continue
-            # Dispatch all macro commands before moving to the next line
-            if self.macro_stack.has_next():
-                self.cmd_from_sd = True
-                try:
-                    self.macro_stack.run_next()
-                    self.cmd_from_sd = False
-                    continue
-                except self.gcode.error as e:
-                    error_message = str(e)
-                    try:
-                        self.gcode.run_script(self.on_error_gcode.render())
-                    except:
-                        logging.exception("virtual_sdcard on_error")
-                    break
-                except:
-                    logging.exception("virtual_sdcard dispatch")
-                    break
             # Dispatch command
             self.cmd_from_sd = True
             line = lines.pop()

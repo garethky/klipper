@@ -113,12 +113,13 @@ class GCodeMacroStackEntry:
     def __init__(self, macro, lines):
         self._macro = macro
         self._lines = lines.split('\n')
+        self._lines.reverse()
     
     def next_line(self):
         return self._lines.pop()
     
     def has_next_line(self):
-        return len(self.lines) > 0
+        return len(self._lines) > 0
     
     def exit_script(self):
         self._macro.exit_script()
@@ -126,7 +127,7 @@ class GCodeMacroStackEntry:
     def dispose(self):
         self.exit_script()
         self._macro = None
-        self._lines.clear()
+        del self._lines[:]
 
 class GCodeMacroStack:
     def __init__(self, config):
@@ -157,7 +158,7 @@ class GCodeMacroStack:
     def clear(self):
         for frame in self._stack:
             frame.dispose()
-        self._stack.clear()
+        del self._stack[:]
 
 ######################################################################
 # GCode macro
@@ -237,9 +238,11 @@ class GCodeMacro:
         kwparams['rawparams'] = gcmd.get_raw_command_parameters()
         macro_stack = gcmd.get_macro_stack()
         self.in_script = True
-        if macro_stack:
+        if macro_stack is not None:
+            logging.info("Macro stack found, adding to stack: " + self.alias)
             macro_stack.push(self, self.template.render(kwparams))
         else:
+            logging.info("Atomic macro run: " + self.alias)
             try:
                 self.template.run_gcode_from_command(kwparams)
             finally:
