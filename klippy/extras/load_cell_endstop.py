@@ -3,142 +3,7 @@ import chelper
 from mcu import TRSYNC_SINGLE_MCU_TIMEOUT, TRSYNC_TIMEOUT, MCU_trsync
 import sys
 
-class LoadCellEndstopCalibrator:
-    def __init__(self, config, lc_endstop, load_cell):
-        self._printer = config.get_printer()
-        self._load_cell = load_cell
-        self._lc_endstop = lc_endstop
-        self._collector = self._load_cell.get_collector()
-        name = config.get_name()
-        self.register_commands(name)
-        if name == "load_cell":
-            self.register_commands(None)
-    def register_commands(self, name):
-        gcode = self._printer.lookup_object('gcode')
-        gcode.register_mux_command("CALIBRATE_LOAD_CELL_ENDSTOP", 
-                            "LOAD_CELL_ENDSTOP",
-                            name, self.cmd_CALIBRATE_LOAD_CELL_ENDSTOP,
-                            desc=self.cmd_CALIBRATE_LOAD_CELL_ENDSTOP_help)
-        gcode.register_mux_command("RESET_LOAD_CELL_ENDSTOP",
-                            "LOAD_CELL_ENDSTOP",
-                            name, self.cmd_RESET_LOAD_CELL_ENDSTOP,
-                            desc=self.cmd_RESET_LOAD_CELL_ENDSTOP_help)
-        gcode.register_mux_command("CONFIGURE_LOAD_CELL_ENDSTOP", "LOAD_CELL_ENDSTOP",
-                            name, self.cmd_CONFIGURE_LOAD_CELL_ENDSTOP,
-                            desc=self.cmd_CONFIGURE_LOAD_CELL_ENDSTOP_help)
-    cmd_RESET_LOAD_CELL_ENDSTOP_help = "Reset Load Cell Endstop"
-    def cmd_RESET_LOAD_CELL_ENDSTOP(self, gcmd):
-        self._lc_endstop.reset()
-        return
-    cmd_CALIBRATE_LOAD_CELL_ENDSTOP_help = "Calibrate Load Cell Endstop"
-    def cmd_CALIBRATE_LOAD_CELL_ENDSTOP(self, gcmd):
-        # if 1, apply the settings immediatly
-        apply_settings = gcmd.get_int("APPLY", default=0, minval=0, maxval=1)
-        # the default is 1 seconds worth of samples at whatever the sample rate
-        # is, or minval if that is larger.
-        sample_seconds = gcmd.get_int("SAMPLE_SECONDS", default=5,
-                        minval=1, maxval=60)
-        # The maximum % of the raw signal width that the sample filter should
-        # produce.
-        sample_smoothing = gcmd.get_int("SAMPLE_SMOOTHING", default=25,
-                        minval=5, maxval=100)
-        # Deadband will be +/- 10% larger than the sample width
-        deadband_gap = gcmd.get_int("DEADBAND_GAP", default=25, minval=1,
-                        maxval=200)
-        # Over 1 second, what is the maximum allowed change in the deadband
-        # centerline value as a % of the width of the deadband.
-        trend_rate = gcmd.get_float("TREND_RATE", default=0.75, minval=0.01,
-                                    maxval=10.0)
-        # This is the number of multiples of the raw sample width (+/-) where
-        # the crash ban dwill be located. 1 = max sample + sample width & min
-        # sample - sample width
-        crash_gap = gcmd.get_int("CRASH_GAP", default=5, minval=1, maxval=100)
-        
-        if not self._load_cell.is_capturing():
-            raise self._printer.command_error("Load Cell not capturing")
-        sample_count = self._load_cell.sps() * sample_seconds
-        samples = self._collector.collect(sample_count)
-        samples = [sample[1] for sample in samples]
-        results = self.calibrate(samples, sample_smoothing, deadband_gap, trend_rate, crash_gap)
-        gcmd.respond_info("Calibration Complete: Deadband: %i, Crash Min: %i" \
-        " Crash Max: %i, Setpoint Alpha: %i, Trend Alpha: %i," \
-        " Settling Count: %i" % results)
-        if apply_settings:
-            self._lc_endstop.reset_config(*results)
-    cmd_CONFIGURE_LOAD_CELL_ENDSTOP_help = "Configure Load Cell Endstop"
-    def cmd_CONFIGURE_LOAD_CELL_ENDSTOP(self, gcmd):
-        # TODO implement changing of all settings here
-        pass
-    def calibrate(self, samples, sample_smoothing, deadband_gap, trend_rate, 
-                    crash_gap):
-        deadband = sample_alpha = trend_alpha = settling_count = 0
-        crash_min = crash_max = 0
-
-        sps = self._load_cell.sps()
-        sample_width = self._width(samples)
-        sample_avg = self._avg(samples)
-        sample_seconds = float(len(samples)) / float(sps)
-        logging.info("sample width: %i sample average: %i" % (sample_width, sample_avg))
-        crash_max = int(sample_avg + (sample_width * crash_gap))
-        crash_min = int(sample_avg - (sample_width * crash_gap))
-
-        # TODO: do sample alpha based on force in grams when conversion to grams is implemented
-        ema_width = sample_width
-        ema_target_width = (sample_width * (sample_smoothing / 100.0))
-        logging.info("target width: %i, multiplier: %f, smoothing: %i" % (ema_target_width, (sample_smoothing / 100.0), sample_smoothing))
-        while (ema_width > ema_target_width and sample_alpha < 32):
-            sample_alpha += 1
-            sample_ema = self._ema(samples, sample_alpha, sample_avg)
-            ema_width = self._width(sample_ema)
-            logging.info("ema width: %i, target width: %i" % (ema_width, ema_target_width))
-        
-        deadband = int((ema_width / 2.) * (1. + (deadband_gap / 100.)))
-        
-        trend_alpha = sample_alpha + 1
-        deadband_samples = [(deadband - 1) for i in range(5)]
-        trend_delta = deadband
-        target_delta = ((deadband * 2) * (trend_rate / 100.0)) / sample_seconds
-        while (trend_delta > target_delta and trend_alpha < 32):
-            trend_alpha += 1
-            trend_delta = self._ema(deadband_samples, trend_alpha, 0)[-1]
-            logging.info("trend delta: %i" % (trend_delta))
-        
-        #settling_count = 1  # means the minimum value is at least 2!
-        #settling_avg = sample_avg + sample_width
-        #while abs(sample_avg - settling_avg) > (sample_width * 0.01):
-        #    settling_count += 1
-        #    settling_avg = self._avg(samples, settling_count)
-        settling_count = min(sps, 100)
-
-        return (deadband, crash_min, crash_max, sample_alpha, trend_alpha
-                , settling_count)
-    def _pick_sample_size(self, user_sample_size):
-        load_cell_sps = self._load_cell.sps() * user_sample_size
-        return max(load_cell_sps, self._min_samples)
-    def _width(self, data):
-        return max(data) - min(data)
-    def _avg(self, data, points=None):
-        points = len(data) if points is None else points
-        avg = 0
-        for index in range(points):
-            logging.info("avg: %i" % (avg))
-            avg = avg + int((data[index] - avg) / (index + 1))
-        return avg
-    def _ema(self, data, alpha, setpoint=0):
-        # replicates the way the EMA filter works in C
-        half = 1 << (alpha - 1)
-        average = setpoint
-        state = (setpoint << alpha) - setpoint
-        ema_data = []
-        for sample in data:
-            state += sample
-            neg = 1 if state < 0 else 0
-            average = int(state - neg + half) >> alpha
-            state -= average
-            ema_data.append(int(average))
-        return ema_data
-
-DEFAULT_SAMPLE_COUNT = 4
+DEFAULT_SAMPLE_COUNT = 2
 #LoadCellEndstop implements mcu_endstop
 class LoadCellEndstop:
     def __init__(self, config, sensor):
@@ -156,57 +21,34 @@ class LoadCellEndstop:
         self._trdispatch = ffi_main.gc(ffi_lib.trdispatch_alloc(), ffi_lib.free)
         self._trsyncs = [MCU_trsync(mcu, self._trdispatch)]
         self._rest_ticks = 0
-        min_int = -sys.maxint - 1
-        self.deadband = config.getint("deadband", default=1, minval=1
-            , maxval=0xffffff)
-        self.crash_min = config.getint("crash_min", default = -1
-            , minval=min_int, maxval=sys.maxint)
-        self.crash_max = config.getint("crash_max", default = 1
-            , minval=min_int, maxval=sys.maxint)
-        self.setpoint_alpha = config.getint("setpoint_alpha", default=4
-            , minval=1, maxval=31)
-        self.trend_alpha = config.getint("trend_alpha", default=1
-            , minval=1, maxval=31)
-        self.settling_count = config.getint("settling_count", default=100
-            , minval=1, maxval=sys.maxint)
-        self.triggering_samples = config.getint("triggering_samples", default=DEFAULT_SAMPLE_COUNT
-            , minval=1, maxval=5)
-        if self.crash_min > self.crash_max:
-            "Crash minimum must be less than crash maximum"
-        self._mcu.add_config_cmd("config_load_cell_endstop oid=%d deadband=%d "\
-            "crash_min=%d crash_max=%d sample_filter_alpha=%d " \
-            "trend_filter_alpha=%d settling_count=%d" % (self._oid
-            , self.deadband, self.crash_min, self.crash_max
-            , self.setpoint_alpha, self.trend_alpha, self.settling_count))
-        self._mcu.add_config_cmd("load_cell_endstop_home oid=%d trsync_oid=0 " \
-            "trigger_reason=0 sample_count=0"
+        self.trigger_weight = config.getint("trigger_weight", default=1
+                                            , minval=1, maxval=0xffffff)
+        self.sample_count = config.getint("sample_count"
+            , default=DEFAULT_SAMPLE_COUNT, minval=1, maxval=5)
+        self._mcu.add_config_cmd("config_load_cell_endstop oid=%d"\
+            " trigger_weight=%i" % (self._oid, self.trigger_weight))
+        self._mcu.add_config_cmd("load_cell_endstop_home oid=%d trsync_oid=0" \
+            " trigger_reason=0 sample_count=0"
             % (self._oid), on_restart=True)
         self._mcu.register_config_callback(self._build_config)
     def _build_config(self):
         # Lookup commands
         cmd_queue = self._trsyncs[0].get_command_queue()
         self._query_cmd = self._mcu.lookup_query_command(
-            "load_cell_endstop_query_state oid=%c", "load_cell_endstop_state " \
-            "oid=%c homing=%c homing_triggered=%c is_triggered=%c " \
-            "trigger_ticks=%u sample=%i ticks=%u sample_avg=%i trend_avg=%i",
+            "load_cell_endstop_query_state oid=%c", "load_cell_endstop_state" \
+            " oid=%c homing=%c homing_triggered=%c is_triggered=%c" \
+            " trigger_ticks=%u sample=%i sample_ticks=%u trigger_weight=%i",
             oid=self._oid, cq=cmd_queue)
         self._reset_cmd = self._mcu.lookup_command(
-            "reset_load_cell_endstop oid=%c deadband=%i crash_min=%i " \
-            "crash_max=%i sample_filter_alpha=%c trend_filter_alpha=%c " \
-            "settling_count=%i", cq=cmd_queue)
-        self._home_cmd = self._mcu.lookup_command("load_cell_endstop_home " \
-            "oid=%c trsync_oid=%c trigger_reason=%c sample_count=%c"
+            "reset_load_cell_endstop oid=%c trigger_weight=%i", cq=cmd_queue)
+        self._home_cmd = self._mcu.lookup_command("load_cell_endstop_home" \
+            " oid=%c trsync_oid=%c trigger_reason=%c sample_count=%c"
             , cq=cmd_queue)
         self._load_cell = self._printer.lookup_object(self._config.get_name())
-        LoadCellEndstopCalibrator(self._config, self, self._load_cell)
     def get_status(self, eventtime):
         return {
-            'deadband': self.deadband,
-            'settling_count': self.settling_count,
-            'setpoint_alpha': self.setpoint_alpha,
-            'trend_alpha': self.trend_alpha,
-            'crash_min': self.crash_min,
-            'crash_max': self.crash_max
+            'trigger_weight': self.trigger_weight,
+            'sample_count': self.sample_count
         }
     def get_mcu(self):
         return self._mcu
@@ -218,30 +60,17 @@ class LoadCellEndstop:
             if stepper.is_active_axis('z'):
                 self.add_stepper(stepper)
     def reset(self):
-        self._reset_cmd.send([self._oid, self.deadband, self.crash_min
-            , self.crash_max, self.setpoint_alpha, self.trend_alpha
-            , self.settling_count])
+        self._reset_cmd.send([self._oid])
         pause_time = float(self.settling_count) * (1. / self._load_cell.sps())
         reactor = self._mcu.get_printer().get_reactor()
         reactor.pause(reactor.monotonic() + pause_time)
         logging.info("LCE: reset")
-    def reset_config(self, deadband, crash_min, crash_max, setpoint_alpha
-                        , trend_alpha, settling_count):
-        self.deadband = deadband
-        self.crash_min = crash_min
-        self.crash_max = crash_max
-        self.setpoint_alpha = setpoint_alpha
-        self.trend_alpha = trend_alpha
-        self.settling_count = settling_count
+    def reset_config(self, trigger_weight):
+        self.trigger_weight = trigger_weight
         # Store results for SAVE_CONFIG
         configfile = self._printer.lookup_object('configfile')
         name = self._config_name
-        configfile.set(name, 'deadband', "%.3f" % (deadband,))
-        configfile.set(name, 'crash_min', "%.3f" % (crash_min,))
-        configfile.set(name, 'crash_max', "%.3f" % (crash_max,))
-        configfile.set(name, 'setpoint_alpha', "%.3f" % (setpoint_alpha,))
-        configfile.set(name, 'trend_alpha', "%.3f" % (trend_alpha,))
-        configfile.set(name, 'settling_count', "%.3f" % (settling_count,))
+        configfile.set(name, 'trigger_weight', "%.3f" % (trigger_weight,))
         self.reset()
     def add_stepper(self, stepper):
         trsyncs = {trsync.get_mcu(): trsync for trsync in self._trsyncs}
@@ -308,6 +137,8 @@ class LoadCellEndstop:
         self._home_cmd.send([self._oid, 0, 0, 0])
         # The time of the first sample that triggered is in "trigger_ticks"
         next_clock = self._mcu.clock32_to_clock64(params['trigger_ticks'])
+        # TODO: this is where we use Linear Regression to find the collision 
+        # time and insert that time instead of the trigger time.
         trigger_t = self._mcu.clock_to_print_time(next_clock - self._rest_ticks)
         return trigger_t
     def query_endstop(self, print_time):
@@ -318,7 +149,7 @@ class LoadCellEndstop:
         if self._mcu.is_fileoutput():
             return 0
         params = self._query_cmd.send([self._oid], minclock=clock)
-        logging.info("load_cell_endstop_state oid=%u homing=%u homing_triggered=%u is_triggered=%u trigger_ticks=%u sample=%i ticks=%u sample_avg=%i trend_avg=%i", params['oid'], params['homing'], params['homing_triggered'], params['is_triggered'], params['trigger_ticks'], params['sample'], params['ticks'], params['sample_avg'], params['trend_avg'])
+        logging.info("load_cell_endstop_state oid=%u homing=%u homing_triggered=%u is_triggered=%u trigger_ticks=%u sample=%i sample_ticks=%u", params['oid'], params['homing'], params['homing_triggered'], params['is_triggered'], params['trigger_ticks'], params['sample'], params['ticks'])
         if params['homing'] == 1:
             return params['homing_triggered'] == 1
         else:

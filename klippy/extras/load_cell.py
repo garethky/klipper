@@ -1,15 +1,13 @@
-# ADS1262/1263 ADC Support
+# Load Cell Implementation
 #
 # Copyright (C) 2022 Gareth Farrington <gareth@waves.ky>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, threading, logging, struct
-from subprocess import call
-
 from probe import PrinterProbe
 from load_cell_endstop import LoadCellEndstop
 
-# TODO: move to some soft of logging utility
+# TODO: move to some sort of logging utility
 # turn bytearrays into pretty hex strings: [0xff, 0x1]
 def hexify(bytes):
     return "[%s]" % (",".join([hex(b) for b in bytes]))
@@ -25,7 +23,6 @@ def average(data, points=None):
         points = len(data) if points is None else points
         avg = 0
         for index in range(points):
-            logging.info("avg: %i" % (avg))
             avg = avg + int((data[index] - avg) / (index + 1))
         return avg
 
@@ -46,8 +43,8 @@ class LoadCellSensor:
     # get the number of samples per second
     def get_samples_per_second(self):
         pass
-    # convert an array of samples to Volts
-    def samples_to_volts(self, samples):
+    # convert a raw sample to Volts
+    def sample_to_volts(self):
         pass
 
 # Interface for subscribers of load cell data
@@ -69,11 +66,12 @@ ERROR_DUPELICATE = 4
 MAX_SAMPLES = 16
 
 class LoadCellCaptureHelper:
-    def __init__(self, printer, sensor, oid):
+    def __init__(self, printer, load_cell):
         self.printer = printer
-        self.sensor = sensor
-        self.oid = oid
-        self.mcu = mcu = sensor.get_spi().get_mcu()
+        self.load_cell = load_cell
+        self.oid = oid = load_cell.oid
+        self.sensor = load_cell.sensor
+        self.mcu = mcu = self.sensor.get_spi().get_mcu()
         self.lock = threading.Lock()
         self.last_sequence = 0
         # Capture message storage (accessed from background thread)
@@ -102,8 +100,8 @@ class LoadCellCaptureHelper:
         with self.lock:
             self.capture_buffer.append(new_capture)
         # DEBUG
-        # d = bytearray(new_capture['data'])
-        # logging.info("Load Cell Samples: %s (%i)", hexify(d), len(d))
+        #d = bytearray(new_capture['data'])
+        #logging.info("Load Cell Samples: %s (%i)", hexify(d), len(d))
     def empty_buffer(self):
         with self.lock:
             last_batch = self.capture_buffer
@@ -163,7 +161,7 @@ class LoadCellCaptureHelper:
         start_clock = self.start_clock
         time_shift = self.time_shift
         clock_to_print_time = self.mcu.clock_to_print_time
-        # this isnt thread protected....
+        # this isn't thread protected....
         last_sequence = self.last_sequence
         # Process every message in raw_samples
         count = error_count = duplicate_count = 0
@@ -184,18 +182,19 @@ class LoadCellCaptureHelper:
                         error_count, duplicate_count, i = self._process_error(d, i, error_count, duplicate_count)
                     else:
                         sample, i = self._extract_int32(d, i)
-                        sample_average, i = self._extract_int32(d, i)
-                        trend_average, i = self._extract_int32(d, i)
                         mclock = msg_mclock + (i * sample_ticks)
                         # timestamp is mcu clock offset shifted by time_shift
                         sclock = mclock + (tcode << time_shift)
                         ptime = round(clock_to_print_time(sclock) - static_delay, 6)
-                        samples[count] = (ptime, sample, sample_average, trend_average)
+                        grams = self.load_cell.sample_to_grams(sample)
+                        samples[count] = (ptime, sample, grams)
                         count += 1
             except Exception:
                 logging.info("Load Cell Samples threw an error: %s (%i) i: %i, e: %i, d: %i", hexify(d), data_len, i, error_count, duplicate_count)
         self.last_sequence = last_sequence
+        # trim empty entries from the end of the list
         del samples[count:]
+        logging.info("GOT SAMPLES: %i, %i, ERRORS: %i, duplicates: %i" % (count, len(samples), error_count, duplicate_count))
         return samples, error_count, duplicate_count
 
 class LoadCellCommandHelper:
@@ -220,6 +219,14 @@ class LoadCellCommandHelper:
                                    name,
                                    self.cmd_CONFIG_LOAD_CELL_CAPTURE,
                                    desc=self.cmd_CONFIG_LOAD_CELL_CAPTURE_help)
+        gcode.register_mux_command("TARE_LOAD_CELL", "LOAD_CELL",
+                                   name,
+                                   self.cmd_TARE_LOAD_CELL,
+                                   desc=self.cmd_TARE_LOAD_CELL_help)
+        gcode.register_mux_command("CALIBRATE_LOAD_CELL", "LOAD_CELL",
+                                   name,
+                                   self.cmd_CALIBRATE_LOAD_CELL,
+                                   desc=self.cmd_CALIBRATE_LOAD_CELL_help)
         gcode.register_mux_command("READ_LOAD_CELL", "LOAD_CELL",
                                    name,
                                    self.cmd_READ_LOAD_CELL,
@@ -241,17 +248,43 @@ class LoadCellCommandHelper:
         report_rate = gcmd.get_int("REPORT_RATE", default=1, minval=1
                                     , maxval=65535)
         self.load_cell.set_report_rate(report_rate)
+    cmd_TARE_LOAD_CELL_help = "Set the Zero point of the load cell"
+    def cmd_TARE_LOAD_CELL(self, gcmd):
+        samples = self.load_cell.get_collector().collect(50)
+        samples = [sample[1] for sample in samples]
+        # if there is already some tare weight applied, account for that:
+        tare_weight = self.load_cell.tare_weight + average(samples)
+        self.load_cell.tare(tare_weight)
+        gcmd.respond_info("Load Cell tare weight value: %i" % (tare_weight))
+    cmd_CALIBRATE_LOAD_CELL_help = "Set the conversion from raw counts to grams"
+    def cmd_CALIBRATE_LOAD_CELL(self, gcmd):
+        samples = self.load_cell.get_collector().collect(1000)
+        samples = [sample[1] for sample in samples]
+        avg = average(samples)
+        volts = self.load_cell.sensor.sample_to_voltage(avg)
+        grams = gcmd.get_float("GRAMS", default=1., minval=1., maxval=5000.)
+        volts_per_gram = (volts / grams)
+        self.load_cell.set_volts_per_gram(volts_per_gram)
+        gcmd.respond_info("Load Cell volts per gram: %f" % (volts_per_gram))
     cmd_READ_LOAD_CELL_help = "Take a reading from the load cell"
     def cmd_READ_LOAD_CELL(self, gcmd):
         samples = self.load_cell.get_collector().collect(1000)
         samples = [sample[1] for sample in samples]
-        min_sample = min(samples)
-        max_sample = max(samples)
-        sample_width = max_sample - min_sample
+        min_sample = self.load_cell.sample_to_grams(min(samples))
+        max_sample = self.load_cell.sample_to_grams(max(samples))
+        sample_width = abs(max_sample - min_sample) / 2.
         avg = average(samples)
-        gcmd.respond_info("Load Cell reading: average: %i, min: %i, max: %i, width: %i, samples: %i" % (avg, min_sample, max_sample, sample_width, len(samples)))
+        #TODO: get std from numpy after rebasing for Python3 support
+        standard_deviation = self.load_cell.sample_to_grams(avg)
+        try_trigger_weight = standard_deviation * 5
+        grams = self.load_cell.sample_to_grams(avg)
+        gcmd.respond_info("Load Cell reading: raw average: %i, weight: %fg," /
+            " min: %fg, max: %fg, noise: +/-%fg, standard deviation: %fg," /
+            " trigger weight: %fg, samples: %i" % (avg, grams, min_sample
+            , max_sample, sample_width, standard_deviation, try_trigger_weight
+            , len(samples)))
 
-# Utitity for GCode commands to easily collect some samples for analsys
+# Utility for GCode commands to easily collect some samples for analysis
 # blocks execution while collecting with reactor.pause()
 class LoadCellSampleCollector(LoadCellSubscriber):
     def __init__(self, load_cell, reactor):
@@ -281,12 +314,14 @@ class LoadCellSampleCollector(LoadCellSubscriber):
         return self.samples
 
 UPDATE_INTERVAL = .5
-# Printer class that controls ADS1263 chip
+# Printer class that controls the load cell
 class LoadCell:
     def __init__(self, config, sensor, load_cell_endstop):
         self.printer = printer = config.get_printer()
         # sensor must implement LoadCellDataSource
         self.sensor = sensor
+        self.tare_weight = 0
+        self.volts_per_gram = 1.
         LoadCellCommandHelper(config, self)
         self.load_cell_endstop = load_cell_endstop
         self.load_cell_endstop_oid = 0
@@ -310,10 +345,12 @@ class LoadCell:
         self.dump = []
         self.subscribers = []
     def _build_config(self):
-        self.samples = LoadCellCaptureHelper(self.printer, self.sensor, self.oid)
+        self.samples = LoadCellCaptureHelper(self.printer, self)
         cmd_queue = self.sensor.get_spi().get_command_queue()
         self._set_report_rate_cmd = self.mcu.lookup_command(
             "set_load_cell_report_rate oid=%c report_rate=%u", cq=cmd_queue)
+        self._tare_cmd = self.mcu.lookup_command(
+            "set_load_cell_tare_weight oid=%c tare_weight=%i", cq=cmd_queue)
     def is_capturing(self):
         return self.samples.is_measuring()
     def sps(self):
@@ -340,6 +377,13 @@ class LoadCell:
         for subscriber in self.subscribers:
             subscriber.status(self.is_capturing(), self.sps())
         return True
+    def tare(self, tare_weight):
+        self._tare_cmd.send([self.oid, tare_weight])
+        self.tare_weight = tare_weight
+    def set_volts_per_gram(self, volts_per_gram):
+        self.volts_per_gram = volts_per_gram
+    def sample_to_grams(self, sample):
+        return self.sensor.sample_to_voltage(sample) / self.volts_per_gram
     def _start_timer(self):
         reactor = self.printer.get_reactor()
         systime = reactor.monotonic()
@@ -364,7 +408,8 @@ class LoadCell:
         dump_temp = self.dump
         self.dump = []
         return {'dump': dump_temp, 'is_capturing': self.is_capturing()
-                , 'sps': self.sps()}
+                , 'sps': self.sps(), 'tare_weight': self.tare_weight
+                , 'volts_per_gram': self.volts_per_gram}
     def subscribe(self, load_cell_subscriber):
         load_cell_subscriber.status(self.is_capturing(), self.sps())
         self.subscribers.append(load_cell_subscriber)

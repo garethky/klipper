@@ -28,12 +28,13 @@ enum {
 };
 
 #define MAX_SPI_READ_TIME timer_from_us(50)
-#define SAMPLE_WIDTH 13
+#define SAMPLE_WIDTH 5
 #define ERROR_WIDTH 2
 
 struct load_cell {
     struct timer timer;
     uint32_t rest_ticks, report_rate, report_counter;
+    int32_t tare_weight;
     struct spidev_s *spi;
     struct load_cell_endstop *load_cell_endstop;
     uint16_t sequence;
@@ -92,6 +93,16 @@ command_set_load_cell_report_rate(uint32_t *args)
 DECL_COMMAND(command_set_load_cell_report_rate,
             "set_load_cell_report_rate oid=%c report_rate=%u");
 
+// Set the tare weight
+void
+command_set_load_cell_tare_weight(uint32_t *args)
+{
+    struct load_cell *lc = oid_lookup(args[0], command_config_load_cell);
+    lc->tare_weight = args[1];
+}
+DECL_COMMAND(command_set_load_cell_tare_weight,
+            "set_load_cell_tare_weight oid=%c tare_weight=%i");
+
 // Report local measurement buffer
 static void
 load_cell_report(struct load_cell *lc, uint8_t oid)
@@ -115,8 +126,7 @@ flush_if_full(struct load_cell *lc, uint8_t oid)
 // Add an entry to the measurement buffer
 static void
 append_load_cell_measurement(struct load_cell *lc, uint_fast8_t tcode
-                            , uint_fast32_t data, int_fast32_t sample_avg
-                            , int_fast32_t trend_avg)
+                            , uint_fast32_t data)
 {
     lc->data[lc->data_count] = tcode;
     // raw adc counts
@@ -124,16 +134,6 @@ append_load_cell_measurement(struct load_cell *lc, uint_fast8_t tcode
     lc->data[lc->data_count + 2] = data >> 8;
     lc->data[lc->data_count + 3] = data >> 16;
     lc->data[lc->data_count + 4] = data >> 24;
-    // sample filter average
-    lc->data[lc->data_count + 5] = sample_avg;
-    lc->data[lc->data_count + 6] = sample_avg >> 8;
-    lc->data[lc->data_count + 7] = sample_avg >> 16;
-    lc->data[lc->data_count + 8] = sample_avg >> 24;
-    // trend filter average
-    lc->data[lc->data_count + 9] = trend_avg;
-    lc->data[lc->data_count + 10] = trend_avg >> 8;
-    lc->data[lc->data_count + 11] = trend_avg >> 16;
-    lc->data[lc->data_count + 12] = trend_avg >> 24;
     lc->data_count += SAMPLE_WIDTH;
 }
 
@@ -173,17 +173,19 @@ add_load_cell_data(struct load_cell *lc, uint32_t stime, uint32_t mtime
         add_load_cell_error(lc, SE_SCHEDULE);
         return;
     }
-    int32_t sample_avg = -1, trend_avg = -1;
+
+    // correct the sample with the tare value
+    // TODO: in theory this can result in integer overflow
+    int32_t corrected_sample = sample - lc->tare_weight;
+
     // endstop is optional, report if enabled
     if (lc->load_cell_endstop) {
-        load_cell_endstop_report_sample(lc->load_cell_endstop, sample, mtime);
-        sample_avg = load_cell_endstop_sample_avg(lc->load_cell_endstop);
-        trend_avg = load_cell_endstop_trend_avg(lc->load_cell_endstop);
+        load_cell_endstop_report_sample(lc->load_cell_endstop, corrected_sample, mtime);
     }
 
     lc->report_counter += 1;
     if (lc->report_counter >= lc->report_rate) {
-        append_load_cell_measurement(lc, tdiff, sample, sample_avg, trend_avg);
+        append_load_cell_measurement(lc, tdiff, corrected_sample);
         lc->report_counter = 0;
     }
 }
@@ -229,8 +231,9 @@ command_query_load_cell(uint32_t *args)
         if (lc->load_cell_endstop) {
             load_cell_endstop_source_stopped(lc->load_cell_endstop);
         }
-        if (lc->data_count)
+        if (lc->data_count) {
             load_cell_report(lc, oid);
+        }
         sendf("load_cell_end oid=%c sequence=%hu", oid, lc->sequence);
         return;
     }

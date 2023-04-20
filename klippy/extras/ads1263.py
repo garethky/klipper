@@ -330,6 +330,8 @@ class ADS1263CommandHelper:
         self.chip.write_reg(reg, bytearray(val))
 
 # Printer class that controls ADS1263 chip
+V_REF = 5.  # TODO: either put this into the config file or implement 
+            # measuring of the supply voltage
 class ADS1263(load_cell.LoadCellSensor):
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -362,8 +364,11 @@ class ADS1263(load_cell.LoadCellSensor):
             return
         self.send_command(CMD_STOP1)
         self.is_capturing = False
-    def samples_to_volts(self, samples):
-        return [0.0]
+    def sample_to_volts(self, raw_sample):
+        if (raw_sample >> 31 == 1):
+            return V_REF * 2 - raw_sample * V_REF / 0x80000000
+        else:
+            return raw_sample * V_REF / 0x7fffffff
     def _wait(self, milliseconds = 10):
         systime = self.reactor.monotonic()
         print_time = self.mcu.estimated_print_time(systime)

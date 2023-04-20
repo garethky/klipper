@@ -17,58 +17,13 @@ const uint8_t DEFAULT_SAMPLE_COUNT = 2;
 enum { FLAG_IS_HOMING = 1 << 0, FLAG_IS_TRIGGERED = 1 << 1
     , FLAG_IS_HOMING_TRIGGER = 1 << 2 };
 
-// Exponential Moving Average Filter
-struct ema_filter {
-    int64_t state, half;
-    int32_t average;
-    uint8_t alpha;
-};
-
-void
-ema_filter_init_alpha(struct ema_filter *ef, uint8_t alpha)
-{
-    ef->alpha = alpha;
-    ef->half = 1 << (ef->alpha - 1);
-    ef->average = 0;
-    ef->state = 0;
-}
-
-void
-ema_filter_init_setpoint(struct ema_filter *ef, int32_t setpoint)
-{
-    ef->average = setpoint;
-    ef->state = (((int64_t)setpoint) << ef->alpha) - setpoint;
-}
-
-static int32_t
-ema_filter_update(struct ema_filter *ef, int32_t sample)
-{
-    ef->state += sample;
-    uint_fast8_t neg = ((ef->state < 0) ? 1 : 0);
-    ef->average = (ef->state - neg + ef->half) >> ef->alpha;
-    ef->state -= ef->average;
-    return ef->average;
-}
-
 // Endstop Structure
 struct load_cell_endstop {
-    uint32_t trigger_ticks, last_sample_ticks, deadband, settling_count,
-            deadband_count;
-    int32_t last_sample, crash_max, crash_min, settling_average, settling_index;
+    uint32_t trigger_ticks, last_sample_ticks;
+    int32_t last_sample, trigger_weight_min, trigger_weight_max;
     uint8_t flags, trigger_count, trigger_reason, sample_count;
     struct trsync *ts;
-    struct ema_filter sample_filter, trend_filter;
 };
-
-int32_t load_cell_endstop_sample_avg(struct load_cell_endstop *lce)
-{
-    return lce->sample_filter.average;
-}
-
-int32_t load_cell_endstop_trend_avg(struct load_cell_endstop *lce)
-{
-    return lce->trend_filter.average;
-}
 
 static uint8_t
 is_flag_set(uint8_t mask, uint8_t flags)
@@ -86,26 +41,14 @@ set_flag(uint8_t mask, uint8_t value, uint8_t flags)
     }
 }
 
-static int32_t
-average(int32_t avg, int32_t input, int32_t index)
-{
-    return avg + ((input - avg) / (index + 1));
-}
-
 void
-try_trigger(struct load_cell_endstop *lce)
+try_trigger(struct load_cell_endstop *lce, uint8_t is_homing
+                , uint8_t is_homing_triggered)
 {
-    // this flag tracks the "real time" trigger state
-    lce->flags = set_flag(FLAG_IS_TRIGGERED, 1, lce->flags);
-
-    // this flag latches until a reset
-    uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce->flags);
-    uint8_t is_not_triggered = !is_flag_set(FLAG_IS_HOMING_TRIGGER, lce->flags);
-    if (is_homing && is_not_triggered) {
-        trsync_do_trigger(lce->ts, lce->trigger_reason);
-        // Disable further triggering
+    if (is_homing && !is_homing_triggered) {
+        // this flag latches until a reset, disabling further triggering
         lce->flags = set_flag(FLAG_IS_HOMING_TRIGGER, 1, lce->flags);
-        //lce->flags = set_flag(FLAG_IS_HOMING, 0, lce->flags);
+        trsync_do_trigger(lce->ts, lce->trigger_reason);
     }
 }
 
@@ -118,56 +61,11 @@ load_cell_endstop_report_sample(struct load_cell_endstop *lce, int32_t sample
     lce->last_sample = sample;
     lce->last_sample_ticks = ticks;
 
-    uint8_t is_settling = lce->settling_index < lce->settling_count;
-
-    // initialize the filters and settling average
-    if (lce->settling_index == 0) {
-        ema_filter_init_setpoint(&(lce->sample_filter), sample);
-        ema_filter_init_setpoint(&(lce->trend_filter), sample);
-        lce->settling_average = 0;
-    }
-
-    // Update sample filter
-    int32_t sample_avg = ema_filter_update(&(lce->sample_filter), sample);
-
-    // check for a crash and immediatly trigger
-    uint8_t is_crash = (sample_avg > lce->crash_max)
-                        || (sample_avg < lce->crash_min);
-    if (is_crash) {
-        try_trigger(lce);
-        return;
-    }
-
-    // continue settling
-    if (is_settling) {
-        lce->settling_average = average(lce->settling_average, sample
-                                        , lce->settling_index);
-        lce->settling_index += 1;
-        // during setting, keep updating the trend filter so the
-        // settling process is observable as the trend_filter average
-        ema_filter_init_setpoint(&(lce->trend_filter), lce->settling_average);
-        return;
-    }
-
-    int32_t trend_avg = lce->trend_filter.average;
-    uint8_t is_trigger = (sample_avg > (trend_avg + lce->deadband))
-                        || (sample_avg < (trend_avg - lce->deadband));
+    uint8_t is_trigger = sample >= lce->trigger_weight_max 
+                         || sample <= lce->trigger_weight_min;
     uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce->flags);
     uint8_t is_homing_triggered = is_flag_set(FLAG_IS_HOMING_TRIGGER,
-                                            lce->flags);
-    
-    // update the deadband_count
-    if (!is_trigger && lce->deadband_count < lce->settling_count) {
-        lce->deadband_count += 1;
-    } else if (is_trigger) {
-        lce->deadband_count = 0;
-    }
-
-    // Update trend filter with non-trigger points only
-    if (!is_trigger && !is_homing_triggered 
-        && lce->deadband_count == lce->settling_count) {
-        ema_filter_update(&(lce->trend_filter), sample);
-    }
+                                                lce->flags);
 
     // update trigger state
     if (is_trigger && lce->trigger_count > 0) {
@@ -178,12 +76,13 @@ load_cell_endstop_report_sample(struct load_cell_endstop *lce, int32_t sample
         }
 
         lce->trigger_count -= 1;
+        // when the trigger count hits zero, trigger the trsync
         if (lce->trigger_count == 0) {
-            try_trigger(lce);
+            try_trigger(lce, is_homing, is_homing_triggered);
         }
     }
     else if (!is_trigger && lce->trigger_count < lce->sample_count) {
-        // any sample inside the deadband resets the trigger count
+        // any sample thats not a trigger resets the trigger count
         lce->trigger_count = lce->sample_count;
         lce->flags = set_flag(FLAG_IS_TRIGGERED, 0, lce->flags);
         // if homing, but not yet triggered, clear the trigger time
@@ -230,21 +129,13 @@ load_cell_endstop_source_stopped(struct load_cell_endstop *lce)
 }
 
 static void
-reset_endstop(struct load_cell_endstop *lce, uint32_t deadband
-            , int32_t crash_min, int32_t crash_max, uint8_t sample_alpha
-            , uint8_t trend_alpha, uint32_t settling_count)
+reset_endstop(struct load_cell_endstop *lce, int32_t trigger_weight)
 {
     lce->flags = 0;
     lce->trigger_count = lce->sample_count = DEFAULT_SAMPLE_COUNT;
     lce->trigger_ticks = 0;
-    lce->deadband = deadband;
-    lce->crash_min = crash_min;
-    lce->crash_max = crash_max;
-    lce->settling_count = settling_count > 1 ? settling_count : 1;
-    lce->deadband_count = settling_count;
-    lce->settling_index = lce->settling_average = 0;
-    ema_filter_init_alpha(&(lce->sample_filter), sample_alpha);
-    ema_filter_init_alpha(&(lce->trend_filter), trend_alpha);
+    lce->trigger_weight_max = trigger_weight;
+    lce->trigger_weight_min = -(trigger_weight);
 }
 
 // Create a load_cell_endstop
@@ -253,11 +144,10 @@ command_config_load_cell_endstop(uint32_t *args)
 {
     struct load_cell_endstop *lce = oid_alloc(args[0]
                             , command_config_load_cell_endstop, sizeof(*lce));
-    reset_endstop(lce, args[1], args[2], args[3], args[4], args[5], args[6]);
+    reset_endstop(lce, args[1]);
 }
 DECL_COMMAND(command_config_load_cell_endstop, "config_load_cell_endstop oid=%c"
-    " deadband=%i crash_min=%i crash_max=%i sample_filter_alpha=%c"
-    " trend_filter_alpha=%c settling_count=%i");
+    " trigger_weight=%i");
 
 // Lookup a load_cell_endstop
 struct load_cell_endstop *
@@ -266,16 +156,15 @@ load_cell_endstop_oid_lookup(uint8_t oid)
     return oid_lookup(oid, command_config_load_cell_endstop);
 }
 
-// Reset filters and triggering parameters
+// Triggering parameters
 void
 command_reset_load_cell_endstop(uint32_t *args)
 {
     struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(args[0]);
-    reset_endstop(lce, args[1], args[2], args[3], args[4], args[5], args[6]);
+    reset_endstop(lce, args[1]);
 }
 DECL_COMMAND(command_reset_load_cell_endstop, "reset_load_cell_endstop oid=%c"
-    " deadband=%i crash_min=%i crash_max=%i sample_filter_alpha=%c"
-    " trend_filter_alpha=%c settling_count=%i");
+    " trigger_weight=%i");
 
 // Home an axis
 void
@@ -306,14 +195,14 @@ command_load_cell_endstop_query_state(uint32_t *args)
 {
     uint8_t oid = args[0];
     struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(args[0]);
-    sendf("load_cell_endstop_state oid=%c homing=%c homing_triggered=%c "
-        "is_triggered=%c trigger_ticks=%u sample=%i ticks=%u sample_avg=%i "
-        "trend_avg=%i"
+    sendf("load_cell_endstop_state oid=%c homing=%c homing_triggered=%c"
+        " is_triggered=%c trigger_ticks=%u sample=%i sample_ticks=%u"
+        " trigger_weight=%i"
             , oid, is_flag_set(FLAG_IS_HOMING, lce->flags)
             , is_flag_set(FLAG_IS_HOMING_TRIGGER, lce->flags)
             , is_flag_set(FLAG_IS_TRIGGERED, lce->flags), lce->trigger_ticks 
             , lce->last_sample, lce->last_sample_ticks
-            , lce->sample_filter.average, lce->trend_filter.average);
+            , lce->trigger_weight_max);
 }
 DECL_COMMAND(command_load_cell_endstop_query_state
                 , "load_cell_endstop_query_state oid=%c");
