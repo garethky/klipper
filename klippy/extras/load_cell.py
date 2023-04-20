@@ -190,15 +190,17 @@ class LoadCellCaptureHelper:
                         samples[count] = (ptime, sample, grams)
                         count += 1
             except Exception:
-                logging.info("Load Cell Samples threw an error: %s (%i) i: %i, e: %i, d: %i", hexify(d), data_len, i, error_count, duplicate_count)
+                logging.exception("Load Cell Samples threw an error: %s (%i) i: %i, e: %i, d: %i", hexify(d), data_len, i, error_count, duplicate_count)
         self.last_sequence = last_sequence
         # trim empty entries from the end of the list
         del samples[count:]
-        logging.info("GOT SAMPLES: %i, %i, ERRORS: %i, duplicates: %i" % (count, len(samples), error_count, duplicate_count))
+        #logging.info("GOT SAMPLES: %i, %i, ERRORS: %i, duplicates: %i" % (count, len(samples), error_count, duplicate_count))
         return samples, error_count, duplicate_count
 
+from numpy import std
 class LoadCellCommandHelper:
     def __init__(self, config, load_cell):
+        
         self.printer = config.get_printer()
         self.load_cell = load_cell
         self.bg_client = None
@@ -261,7 +263,7 @@ class LoadCellCommandHelper:
         samples = self.load_cell.get_collector().collect(1000)
         samples = [sample[1] for sample in samples]
         avg = average(samples)
-        volts = self.load_cell.sensor.sample_to_voltage(avg)
+        volts = self.load_cell.sensor.sample_to_volts(avg)
         grams = gcmd.get_float("GRAMS", default=1., minval=1., maxval=5000.)
         volts_per_gram = (volts / grams)
         self.load_cell.set_volts_per_gram(volts_per_gram)
@@ -275,12 +277,12 @@ class LoadCellCommandHelper:
         sample_width = abs(max_sample - min_sample) / 2.
         avg = average(samples)
         #TODO: get std from numpy after rebasing for Python3 support
-        standard_deviation = self.load_cell.sample_to_grams(avg)
-        try_trigger_weight = standard_deviation * 5
+        standard_deviation = self.load_cell.sample_to_grams(int(std(samples)))
+        try_trigger_weight = standard_deviation * 5.
         grams = self.load_cell.sample_to_grams(avg)
-        gcmd.respond_info("Load Cell reading: raw average: %i, weight: %fg," /
-            " min: %fg, max: %fg, noise: +/-%fg, standard deviation: %fg," /
-            " trigger weight: %fg, samples: %i" % (avg, grams, min_sample
+        gcmd.respond_info("Load Cell reading: raw average: %i, weight: %fg, \
+             min: %fg, max: %fg, noise: +/-%fg, standard deviation: %sg, \
+             trigger weight: %sg, samples: %i" % (avg, grams, min_sample
             , max_sample, sample_width, standard_deviation, try_trigger_weight
             , len(samples)))
 
@@ -383,7 +385,7 @@ class LoadCell:
     def set_volts_per_gram(self, volts_per_gram):
         self.volts_per_gram = volts_per_gram
     def sample_to_grams(self, sample):
-        return self.sensor.sample_to_voltage(sample) / self.volts_per_gram
+        return self.sensor.sample_to_volts(sample) / self.volts_per_gram
     def _start_timer(self):
         reactor = self.printer.get_reactor()
         systime = reactor.monotonic()

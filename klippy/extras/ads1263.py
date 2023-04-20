@@ -330,8 +330,6 @@ class ADS1263CommandHelper:
         self.chip.write_reg(reg, bytearray(val))
 
 # Printer class that controls ADS1263 chip
-V_REF = 5.  # TODO: either put this into the config file or implement 
-            # measuring of the supply voltage
 class ADS1263(load_cell.LoadCellSensor):
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -341,6 +339,10 @@ class ADS1263(load_cell.LoadCellSensor):
         self.mcu = self.spi.get_mcu()
         self.samples_per_second = 4 # default is 20SPS
         self.is_capturing = False
+        self.gain = 1
+        self.vref = 2.5
+        self.counts_per_volt = 0
+        self._update_counts_per_volt()
         ADS1263CommandHelper(config, self)
         #TODO: when klipper restarts, always RESET the ADS_1263
     # LoadCellDataSource methods
@@ -364,11 +366,16 @@ class ADS1263(load_cell.LoadCellSensor):
             return
         self.send_command(CMD_STOP1)
         self.is_capturing = False
+    def _update_counts_per_volt(self):
+        # adc counts per Volt = Vref/(Gain * 2^n-1)
+        # Vref = 2.5 - can be changed by the user but this is the default
+        # Gain = gain setting 1, 2, 4, 8, 16 or 32
+        # n = no of bits
+        # doing this here saves on doing it for each conversion
+        self.counts_per_volt = self.vref / (self.gain * math.pow(2,31))
     def sample_to_volts(self, raw_sample):
-        if (raw_sample >> 31 == 1):
-            return V_REF * 2 - raw_sample * V_REF / 0x80000000
-        else:
-            return raw_sample * V_REF / 0x7fffffff
+        # voltage = counts per V * adc count
+        return self.counts_per_volt * raw_sample
     def _wait(self, milliseconds = 10):
         systime = self.reactor.monotonic()
         print_time = self.mcu.estimated_print_time(systime)
@@ -413,6 +420,8 @@ class ADS1263(load_cell.LoadCellSensor):
             val = FIELD_MODE2_PGA_ENABLE.set_value(val, pga_enable)
         if gain is not None:
             val = FIELD_MODE2_GAIN.set_value(val, gain)
+            self.gain = 2 ^ (gain + 1) # get actual gain value
+            self._update_counts_per_volt()
         return REG_MODE2.to_string(REG_MODE2.write(self, val))
     def set_ref_mux(self, vref):
         if vref is None: return
