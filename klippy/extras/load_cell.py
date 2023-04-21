@@ -43,9 +43,6 @@ class LoadCellSensor:
     # get the number of samples per second
     def get_samples_per_second(self):
         pass
-    # convert a raw sample to Volts
-    def sample_to_volts(self):
-        pass
 
 # Interface for subscribers of load cell data
 class LoadCellSubscriber:
@@ -84,6 +81,7 @@ class LoadCellCaptureHelper:
         self.last_angle = 0
         self.last_chip_mcu_clock = 0
         self.last_chip_clock = 0
+        # TODO: load over/under sample rate from the config
         self.oversample_rate = 1.
         self.static_delay = 0
         freq = mcu.seconds_to_clock(1.)
@@ -99,9 +97,6 @@ class LoadCellCaptureHelper:
     def _add_samples(self, new_capture):
         with self.lock:
             self.capture_buffer.append(new_capture)
-        # DEBUG
-        #d = bytearray(new_capture['data'])
-        #logging.info("Load Cell Samples: %s (%i)", hexify(d), len(d))
     def empty_buffer(self):
         with self.lock:
             last_batch = self.capture_buffer
@@ -120,9 +115,6 @@ class LoadCellCaptureHelper:
                         * self.oversample_rate)
         rest_ticks = self.mcu.seconds_to_clock(sample_period)
         self.sample_ticks = rest_ticks
-        # DEBUG
-        # logging.info("Sample Period: %f, Samples per second: %i, MCU frequency: %i", sample_period, self.sensor.get_samples_per_second(), self.mcu._mcu_freq)
-        # logging.info("sending: query_load_cell oid=%i clock=%i rest_ticks=%i time_shift=%i", self.oid, reqclock, rest_ticks, self.time_shift)
         self.query_load_cell_cmd.send([self.oid, reqclock, rest_ticks,
                                        self.time_shift], reqclock=reqclock)
     def stop_capture(self):
@@ -133,17 +125,7 @@ class LoadCellCaptureHelper:
     def _extract_byte(self, b, i):
         return (b[i], i+1)
     def _extract_int32(self, b, i):
-        # bits = b[i] | b[i+1] << 8 | b[i+2] << 16 | b[i+3] << 24
         value = struct.unpack_from('<i', b, offset=i)[0]
-        # out = 0.0
-        # TODO: do we want to return Volts or raw Counts??
-        # TODO: this conversion should be happening only in the ADS1263 code, it cant be safe to do it here as its sensor specific
-        # TODO: Where do we get the reference voltage??
-        #REF = 5.00
-        #if (value >> 31 == 1):
-        #    out = (REF * 2 - value * REF / 0x80000000)
-        #else:
-        #    out = (value * REF / 0x7fffffff)
         return (value, i + 4)
     def _process_error(self, data, i, error_count, duplicate_count):
         error, i = self._extract_byte(data, i)
@@ -186,8 +168,7 @@ class LoadCellCaptureHelper:
                         # timestamp is mcu clock offset shifted by time_shift
                         sclock = mclock + (tcode << time_shift)
                         ptime = round(clock_to_print_time(sclock) - static_delay, 6)
-                        grams = self.load_cell.sample_to_grams(sample)
-                        samples[count] = (ptime, sample, grams)
+                        samples[count] = (ptime, sample)
                         count += 1
             except Exception:
                 logging.exception("Load Cell Samples threw an error: %s (%i) i: %i, e: %i, d: %i", hexify(d), data_len, i, error_count, duplicate_count)
@@ -217,10 +198,6 @@ class LoadCellCommandHelper:
         gcode.register_mux_command("STOP_LOAD_CELL_CAPTURE", "LOAD_CELL", name,
                                    self.cmd_STOP_LOAD_CELL_CAPTURE,
                                    desc=self.cmd_STOP_LOAD_CELL_CAPTURE_help)
-        gcode.register_mux_command("CONFIG_LOAD_CELL_CAPTURE", "LOAD_CELL",
-                                   name,
-                                   self.cmd_CONFIG_LOAD_CELL_CAPTURE,
-                                   desc=self.cmd_CONFIG_LOAD_CELL_CAPTURE_help)
         gcode.register_mux_command("TARE_LOAD_CELL", "LOAD_CELL",
                                    name,
                                    self.cmd_TARE_LOAD_CELL,
@@ -245,41 +222,35 @@ class LoadCellCommandHelper:
             gcmd.respond_info("Load Cell capture stopped")
         else:
             raise self.printer.command_error("Load Cell capture not started")
-    cmd_CONFIG_LOAD_CELL_CAPTURE_help = "Change capture settings on the fly"
-    def cmd_CONFIG_LOAD_CELL_CAPTURE(self, gcmd):
-        report_rate = gcmd.get_int("REPORT_RATE", default=1, minval=1
-                                    , maxval=65535)
-        self.load_cell.set_report_rate(report_rate)
     cmd_TARE_LOAD_CELL_help = "Set the Zero point of the load cell"
     def cmd_TARE_LOAD_CELL(self, gcmd):
-        samples = self.load_cell.get_collector().collect(50)
+        samples = self.load_cell.get_collector().collect(self.load_cell.sps())
         samples = [sample[1] for sample in samples]
-        # if there is already some tare weight applied, account for that:
-        tare_weight = self.load_cell.tare_weight + average(samples)
-        self.load_cell.tare(tare_weight)
-        gcmd.respond_info("Load Cell tare weight value: %i" % (tare_weight))
+        tare_counts = average(samples)
+        self.load_cell.tare(tare_counts)
+        gcmd.respond_info("Load Cell tare weight value: %i" % (tare_counts))
     cmd_CALIBRATE_LOAD_CELL_help = "Set the conversion from raw counts to grams"
     def cmd_CALIBRATE_LOAD_CELL(self, gcmd):
         samples = self.load_cell.get_collector().collect(1000)
         samples = [sample[1] for sample in samples]
         avg = average(samples)
-        volts = self.load_cell.sensor.sample_to_volts(avg)
         grams = gcmd.get_float("GRAMS", default=1., minval=1., maxval=5000.)
-        volts_per_gram = (volts / grams)
-        self.load_cell.set_volts_per_gram(volts_per_gram)
-        gcmd.respond_info("Load Cell volts per gram: %f" % (volts_per_gram))
+        counts_per_gram = abs(int(avg / grams))
+        self.load_cell.set_counts_per_gram(counts_per_gram)
+        max_weight = int(int(0x7FFFFFFF) / counts_per_gram)
+        gcmd.respond_info("Load Cell Calibrates. counts per gram: %i, max\
+                           weight: %ig" % (counts_per_gram, max_weight))
     cmd_READ_LOAD_CELL_help = "Take a reading from the load cell"
     def cmd_READ_LOAD_CELL(self, gcmd):
         samples = self.load_cell.get_collector().collect(1000)
         samples = [sample[1] for sample in samples]
-        min_sample = self.load_cell.sample_to_grams(min(samples))
-        max_sample = self.load_cell.sample_to_grams(max(samples))
+        min_sample = self.load_cell.counts_to_grams(min(samples))
+        max_sample = self.load_cell.counts_to_grams(max(samples))
         sample_width = abs(max_sample - min_sample) / 2.
         avg = average(samples)
-        #TODO: get std from numpy after rebasing for Python3 support
-        standard_deviation = self.load_cell.sample_to_grams(int(std(samples)))
+        standard_deviation = abs(self.load_cell.counts_to_grams(int(std(samples))))
         try_trigger_weight = standard_deviation * 5.
-        grams = self.load_cell.sample_to_grams(avg)
+        grams = self.load_cell.counts_to_grams(avg)
         gcmd.respond_info("Load Cell reading: raw average: %i, weight: %fg, \
              min: %fg, max: %fg, noise: +/-%fg, standard deviation: %sg, \
              trigger weight: %sg, samples: %i" % (avg, grams, min_sample
@@ -322,18 +293,23 @@ class LoadCell:
         self.printer = printer = config.get_printer()
         # sensor must implement LoadCellDataSource
         self.sensor = sensor
-        self.tare_weight = 0
-        self.volts_per_gram = 1.
+        self.tare_counts = None
+        self.counts_per_gram = config.getint('counts_per_gram', minval=1
+                                            , default=None)
+        self.is_calibrated = not self.counts_per_gram is None
         LoadCellCommandHelper(config, self)
         self.load_cell_endstop = load_cell_endstop
         self.load_cell_endstop_oid = 0
         if load_cell_endstop is not None:
             self.load_cell_endstop_oid = load_cell_endstop.get_oid()
+            # TODO: get the trigger_force into the load_cell_endstop
         # Setup mcu sensor_load_cell bulk query code
         self.mcu = mcu = self.sensor.get_spi().get_mcu()
         self.oid = oid = mcu.create_oid()
         spi_oid = self.sensor.get_spi().get_oid()
         self.samples = None
+        self.trigger_force_grams = config.getfloat('trigger_force_grams'
+                                                   , minval=10., default=10.)
         mcu.add_config_cmd("config_load_cell oid=%d spi_oid=%d \
                             load_cell_sensor_type=%s load_cell_endstop_oid=%d"
             % (oid, spi_oid, self.sensor.get_capture_name()
@@ -348,11 +324,6 @@ class LoadCell:
         self.subscribers = []
     def _build_config(self):
         self.samples = LoadCellCaptureHelper(self.printer, self)
-        cmd_queue = self.sensor.get_spi().get_command_queue()
-        self._set_report_rate_cmd = self.mcu.lookup_command(
-            "set_load_cell_report_rate oid=%c report_rate=%u", cq=cmd_queue)
-        self._tare_cmd = self.mcu.lookup_command(
-            "set_load_cell_tare_weight oid=%c tare_weight=%i", cq=cmd_queue)
     def is_capturing(self):
         return self.samples.is_measuring()
     def sps(self):
@@ -379,13 +350,26 @@ class LoadCell:
         for subscriber in self.subscribers:
             subscriber.status(self.is_capturing(), self.sps())
         return True
-    def tare(self, tare_weight):
-        self._tare_cmd.send([self.oid, tare_weight])
-        self.tare_weight = tare_weight
-    def set_volts_per_gram(self, volts_per_gram):
-        self.volts_per_gram = volts_per_gram
-    def sample_to_grams(self, sample):
-        return self.sensor.sample_to_volts(sample) / self.volts_per_gram
+    def tare(self, tare_counts):
+        self.tare_counts = tare_counts
+        self.set_endstop_range()
+    def set_counts_per_gram(self, counts_per_gram):
+        if counts_per_gram is None:
+            self.counts_per_gram = None
+            self.is_calibrated = False
+        else:
+            self.counts_per_gram = abs(counts_per_gram)
+            self.is_calibrated = True
+            self.set_endstop_range()
+    def set_endstop_range(self):
+        if not self.load_cell_endstop:
+            return
+        trigger_counts = int(self.trigger_force_grams * self.counts_per_gram)
+        self.load_cell_endstop.set_range(trigger_counts, self.tare_counts)
+    def counts_to_grams(self, sample):
+        if self.counts_per_gram is None:
+            return None
+        return float(sample) / self.counts_per_gram
     def _start_timer(self):
         reactor = self.printer.get_reactor()
         systime = reactor.monotonic()
@@ -403,15 +387,15 @@ class LoadCell:
         for subscriber in self.subscribers:
             subscriber.on_capture(samples)
         return eventtime + UPDATE_INTERVAL
-    def set_report_rate(self, report_rate):
-        sample_rate = self.sps() / min(report_rate, self.sps())
-        self._set_report_rate_cmd.send([self.oid, sample_rate])
     def get_status(self, eventtime):
-        dump_temp = self.dump
+        samples_temp = self.dump
         self.dump = []
-        return {'dump': dump_temp, 'is_capturing': self.is_capturing()
-                , 'sps': self.sps(), 'tare_weight': self.tare_weight
-                , 'volts_per_gram': self.volts_per_gram}
+        return {'is_capturing': self.is_capturing()
+                , 'is_calibrated': self.is_calibrated
+                , 'sps': self.sps()
+                , 'tare_counts': self.tare_counts
+                , 'counts_per_gram': self.counts_per_gram
+                , 'samples': samples_temp}
     def subscribe(self, load_cell_subscriber):
         load_cell_subscriber.status(self.is_capturing(), self.sps())
         self.subscribers.append(load_cell_subscriber)
@@ -432,7 +416,8 @@ def load_config(config):
     if config.getboolean('is_probe', default=False):
         endstop = LoadCellEndstop(config, sensor)
         printer.add_object('load_cell_endstop' + name, endstop)
-        printer.add_object('load_cell_probe' + name, PrinterProbe(config, endstop))
+        printer.add_object('load_cell_probe' + name
+                           , PrinterProbe(config, endstop))
     return LoadCell(config, sensor, endstop)
 
 def load_config_prefix(config):

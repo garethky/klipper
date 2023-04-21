@@ -20,7 +20,7 @@ enum { FLAG_IS_HOMING = 1 << 0, FLAG_IS_TRIGGERED = 1 << 1
 // Endstop Structure
 struct load_cell_endstop {
     uint32_t trigger_ticks, last_sample_ticks;
-    int32_t last_sample, trigger_weight_min, trigger_weight_max;
+    int32_t last_sample, trigger_counts_min, trigger_counts_max, tare_counts;
     uint8_t flags, trigger_count, trigger_reason, sample_count;
     struct trsync *ts;
 };
@@ -45,6 +45,9 @@ void
 try_trigger(struct load_cell_endstop *lce, uint8_t is_homing
                 , uint8_t is_homing_triggered)
 {
+    // set live trigger flag
+    lce->flags = set_flag(FLAG_IS_TRIGGERED, 1, lce->flags);
+
     if (is_homing && !is_homing_triggered) {
         // this flag latches until a reset, disabling further triggering
         lce->flags = set_flag(FLAG_IS_HOMING_TRIGGER, 1, lce->flags);
@@ -61,8 +64,8 @@ load_cell_endstop_report_sample(struct load_cell_endstop *lce, int32_t sample
     lce->last_sample = sample;
     lce->last_sample_ticks = ticks;
 
-    uint8_t is_trigger = sample >= lce->trigger_weight_max 
-                         || sample <= lce->trigger_weight_min;
+    uint8_t is_trigger = sample >= lce->trigger_counts_max 
+                         || sample <= lce->trigger_counts_min;
     uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce->flags);
     uint8_t is_homing_triggered = is_flag_set(FLAG_IS_HOMING_TRIGGER,
                                                 lce->flags);
@@ -84,7 +87,10 @@ load_cell_endstop_report_sample(struct load_cell_endstop *lce, int32_t sample
     else if (!is_trigger && lce->trigger_count < lce->sample_count) {
         // any sample thats not a trigger resets the trigger count
         lce->trigger_count = lce->sample_count;
+
+        // "live" trigger view
         lce->flags = set_flag(FLAG_IS_TRIGGERED, 0, lce->flags);
+        
         // if homing, but not yet triggered, clear the trigger time
         if (is_homing && !is_homing_triggered) {
             lce->trigger_ticks = 0;
@@ -129,13 +135,22 @@ load_cell_endstop_source_stopped(struct load_cell_endstop *lce)
 }
 
 static void
-reset_endstop(struct load_cell_endstop *lce, int32_t trigger_weight)
+reset_endstop(struct load_cell_endstop *lce)
 {
     lce->flags = 0;
     lce->trigger_count = lce->sample_count = DEFAULT_SAMPLE_COUNT;
     lce->trigger_ticks = 0;
-    lce->trigger_weight_max = trigger_weight;
-    lce->trigger_weight_min = -(trigger_weight);
+    lce->trigger_counts_max = 0;
+    lce->trigger_counts_min = 0;
+}
+
+static void
+set_endstop_range(struct load_cell_endstop *lce, uint32_t trigger_counts
+                , int32_t tare_counts)
+{
+    lce->tare_counts = tare_counts;
+    lce->trigger_counts_max = tare_counts + trigger_counts;
+    lce->trigger_counts_min = tare_counts - trigger_counts;
 }
 
 // Create a load_cell_endstop
@@ -144,10 +159,10 @@ command_config_load_cell_endstop(uint32_t *args)
 {
     struct load_cell_endstop *lce = oid_alloc(args[0]
                             , command_config_load_cell_endstop, sizeof(*lce));
-    reset_endstop(lce, args[1]);
+    reset_endstop(lce);
 }
-DECL_COMMAND(command_config_load_cell_endstop, "config_load_cell_endstop oid=%c"
-    " trigger_weight=%i");
+DECL_COMMAND(command_config_load_cell_endstop, "config_load_cell_endstop"
+                                               " oid=%c");
 
 // Lookup a load_cell_endstop
 struct load_cell_endstop *
@@ -156,15 +171,16 @@ load_cell_endstop_oid_lookup(uint8_t oid)
     return oid_lookup(oid, command_config_load_cell_endstop);
 }
 
-// Triggering parameters
+// Reset endstop
 void
 command_reset_load_cell_endstop(uint32_t *args)
 {
     struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(args[0]);
-    reset_endstop(lce, args[1]);
+    reset_endstop(lce);
+    set_endstop_range(lce, args[1], args[2]);
 }
-DECL_COMMAND(command_reset_load_cell_endstop, "reset_load_cell_endstop oid=%c"
-    " trigger_weight=%i");
+DECL_COMMAND(command_reset_load_cell_endstop, "reset_load_cell_endstop"
+                " oid=%c trigger_counts=%u tare_counts=%i");
 
 // Home an axis
 void
@@ -183,12 +199,12 @@ command_load_cell_endstop_home(uint32_t *args)
     lce->ts = trsync_oid_lookup(args[1]);
     lce->trigger_reason = args[2];
     lce->sample_count = args[3];
-    lce->trigger_count = lce->sample_count;
+    set_endstop_range(lce, args[4], args[5]);
     lce->flags = set_flag(FLAG_IS_HOMING, 1, lce->flags);
 }
 DECL_COMMAND(command_load_cell_endstop_home,
              "load_cell_endstop_home oid=%c trsync_oid=%c trigger_reason=%c"
-             " sample_count=%c");
+             " sample_count=%c trigger_counts=%u tare_counts=%i");
 
 void
 command_load_cell_endstop_query_state(uint32_t *args)
@@ -197,12 +213,10 @@ command_load_cell_endstop_query_state(uint32_t *args)
     struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(args[0]);
     sendf("load_cell_endstop_state oid=%c homing=%c homing_triggered=%c"
         " is_triggered=%c trigger_ticks=%u sample=%i sample_ticks=%u"
-        " trigger_weight=%i"
             , oid, is_flag_set(FLAG_IS_HOMING, lce->flags)
             , is_flag_set(FLAG_IS_HOMING_TRIGGER, lce->flags)
             , is_flag_set(FLAG_IS_TRIGGERED, lce->flags), lce->trigger_ticks 
-            , lce->last_sample, lce->last_sample_ticks
-            , lce->trigger_weight_max);
+            , lce->last_sample, lce->last_sample_ticks);
 }
 DECL_COMMAND(command_load_cell_endstop_query_state
                 , "load_cell_endstop_query_state oid=%c");

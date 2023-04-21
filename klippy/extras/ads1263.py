@@ -270,7 +270,7 @@ class ADS1263CommandHelper:
     def cmd_RESET_ADS1263(self, gcmd):
         if self._not_if_capturing(gcmd):
             return
-        self.chip.reset()
+        gcmd.respond_info(self.chip.reset())
     cmd_CONFIGURE_ADS1263_help = "Configure settings of the ADS1263"
     def cmd_CONFIGURE_ADS1263(self, gcmd):
         if self._not_if_capturing(gcmd):
@@ -332,19 +332,24 @@ class ADS1263CommandHelper:
 # Printer class that controls ADS1263 chip
 class ADS1263(load_cell.LoadCellSensor):
     def __init__(self, config):
-        self.printer = config.get_printer()
-        self.reactor = self.printer.get_reactor()
+        self.printer = printer = config.get_printer()
+        self.reactor = printer.get_reactor()
         # Setup SPI communications on the MCU hosting the sensor
         self.spi = bus.MCU_SPI_from_config(config, 1, default_speed=25000000)
         self.mcu = self.spi.get_mcu()
-        self.samples_per_second = 4 # default is 20SPS
         self.is_capturing = False
-        self.gain = 1
+        self.gain = config.getint('gain', minval=0, maxval=5, default=0)
+        # 400 SPS
+        self.samples_per_second = config.getint('sample_rate', minval=0
+                                                     , maxval=15, default=8)
+        #TODO: read the rest of the properties from the config
         self.vref = 2.5
-        self.counts_per_volt = 0
-        self._update_counts_per_volt()
         ADS1263CommandHelper(config, self)
-        #TODO: when klipper restarts, always RESET the ADS_1263
+        printer.register_event_handler("klippy:firmware_restart", self._connect)
+        printer.register_event_handler("klippy:connect", self._connect)
+    def _connect(self):
+        self.reset()
+        self.configure(gain = self.gain, rate=self.samples_per_second)
     # LoadCellDataSource methods
     def get_spi(self):
         return self.spi
@@ -366,16 +371,6 @@ class ADS1263(load_cell.LoadCellSensor):
             return
         self.send_command(CMD_STOP1)
         self.is_capturing = False
-    def _update_counts_per_volt(self):
-        # adc counts per Volt = Vref/(Gain * 2^n-1)
-        # Vref = 2.5 - can be changed by the user but this is the default
-        # Gain = gain setting 1, 2, 4, 8, 16 or 32
-        # n = no of bits
-        # doing this here saves on doing it for each conversion
-        self.counts_per_volt = self.vref / (self.gain * math.pow(2,31))
-    def sample_to_volts(self, raw_sample):
-        # voltage = counts per V * adc count
-        return self.counts_per_volt * raw_sample
     def _wait(self, milliseconds = 10):
         systime = self.reactor.monotonic()
         print_time = self.mcu.estimated_print_time(systime)
@@ -384,6 +379,10 @@ class ADS1263(load_cell.LoadCellSensor):
         self.stop_capture()
         self.send_command(CMD_RESET)
         self._wait(RESET_DELAY_MS)
+        #clear the reset register
+        reg_val = REG_POWER.read(self)[0]
+        reg_val = FIELD_POWER_RESET.set_value(reg_val, 0)
+        return REG_POWER.to_string(REG_POWER.write(self, reg_val))
     def _calibration_delay_ms(self, data_rate_index, delay_index):
         delay_ms = CONVERSION_DELAY_TIME_MS[delay_index]
         time_per_sample = math.ceil(1000 / SAMPLES_PER_S[data_rate_index])
@@ -419,9 +418,8 @@ class ADS1263(load_cell.LoadCellSensor):
         if pga_enable is not None:
             val = FIELD_MODE2_PGA_ENABLE.set_value(val, pga_enable)
         if gain is not None:
+            self.gain = gain
             val = FIELD_MODE2_GAIN.set_value(val, gain)
-            self.gain = 2 ^ (gain + 1) # get actual gain value
-            self._update_counts_per_volt()
         return REG_MODE2.to_string(REG_MODE2.write(self, val))
     def set_ref_mux(self, vref):
         if vref is None: return
@@ -433,8 +431,9 @@ class ADS1263(load_cell.LoadCellSensor):
         if range is None: return
         return REG_FULL_SCALE_CAL.to_string(
             REG_FULL_SCALE_CAL.write_int(self, range))
-    def configure(self, input, rate, pga_enable, gain, filter_val, chop, vref,
-            offset, range):
+    def configure(self, input=None, rate=None, pga_enable=None, gain=None
+                  , filter_val=None, chop=None, vref=None, offset=None
+                  , range=None):
         self.stop_capture()
         results = [self.set_input(input), self.set_mode0(chop),
             self.set_mode1(filter_val), self.set_mode2(rate, pga_enable, gain),

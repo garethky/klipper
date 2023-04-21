@@ -33,8 +33,7 @@ enum {
 
 struct load_cell {
     struct timer timer;
-    uint32_t rest_ticks, report_rate, report_counter;
-    int32_t tare_weight;
+    uint32_t rest_ticks;
     struct spidev_s *spi;
     struct load_cell_endstop *load_cell_endstop;
     uint16_t sequence;
@@ -83,26 +82,6 @@ DECL_COMMAND(command_config_load_cell,
              "config_load_cell oid=%c spi_oid=%c load_cell_sensor_type=%c"
              " load_cell_endstop_oid=%c");
 
-// Change the report rate
-void
-command_set_load_cell_report_rate(uint32_t *args)
-{
-    struct load_cell *lc = oid_lookup(args[0], command_config_load_cell);
-    lc->report_rate = args[1];
-}
-DECL_COMMAND(command_set_load_cell_report_rate,
-            "set_load_cell_report_rate oid=%c report_rate=%u");
-
-// Set the tare weight
-void
-command_set_load_cell_tare_weight(uint32_t *args)
-{
-    struct load_cell *lc = oid_lookup(args[0], command_config_load_cell);
-    lc->tare_weight = args[1];
-}
-DECL_COMMAND(command_set_load_cell_tare_weight,
-            "set_load_cell_tare_weight oid=%c tare_weight=%i");
-
 // Report local measurement buffer
 static void
 load_cell_report(struct load_cell *lc, uint8_t oid)
@@ -146,16 +125,6 @@ add_load_cell_error(struct load_cell *lc, uint8_t error_code)
         load_cell_endstop_report_error(lc->load_cell_endstop, error_code);
     }
 
-    // count duplicates like regular data reports
-    if (error_code == SE_DUPELICATE) {
-        lc->report_counter += 1;
-        // send sampled duplicate reports only
-        if (lc->report_counter < lc->report_rate) {
-            return;
-        }
-        lc->report_counter = 0;
-    }
-
     lc->data[lc->data_count] = TCODE_ERROR;
     lc->data[lc->data_count + 1] = error_code;
     lc->data_count += ERROR_WIDTH;
@@ -174,20 +143,13 @@ add_load_cell_data(struct load_cell *lc, uint32_t stime, uint32_t mtime
         return;
     }
 
-    // correct the sample with the tare value
-    // TODO: in theory this can result in integer overflow
-    int32_t corrected_sample = sample - lc->tare_weight;
-
     // endstop is optional, report if enabled
     if (lc->load_cell_endstop) {
-        load_cell_endstop_report_sample(lc->load_cell_endstop, corrected_sample, mtime);
+        load_cell_endstop_report_sample(lc->load_cell_endstop, sample
+                                            , mtime);
     }
 
-    lc->report_counter += 1;
-    if (lc->report_counter >= lc->report_rate) {
-        append_load_cell_measurement(lc, tdiff, corrected_sample);
-        lc->report_counter = 0;
-    }
+    append_load_cell_measurement(lc, tdiff, sample);
 }
 
 // ads1263 sensor query
@@ -199,15 +161,21 @@ ads1263_query(struct load_cell *lc, uint32_t stime)
     spidev_transfer(lc->spi, 1, sizeof(msg), msg);
     uint32_t read_end_time = timer_read_time();
 
+    // check the status byte to see if the chip reset
+    if ((msg[1] & 0x1) == 1) {
+        shutdown("ADS1263 Reported an unexpected reset while sampling!");
+    }
     // check the status byte to see if the data is fresh, if not ignore
-    if ((msg[1] & 0x40) == 0) {
+    else if ((msg[1] & 0x40) == 0) {
         add_load_cell_error(lc, SE_DUPELICATE);
         return;
     }
+    // check for a timing error
     else if (read_end_time - measurement_time > MAX_SPI_READ_TIME) {
         add_load_cell_error(lc, SE_SPI_TIME);
         return;
     }
+
     // TODO: perform CRC check
     // uint8_t crc = msg[6]
     // else if (!test_crc(msg, crc))
@@ -242,7 +210,6 @@ command_query_load_cell(uint32_t *args)
     lc->rest_ticks = args[2];
     lc->time_shift = args[3];
     lc->sequence = 0;
-    lc->report_counter = 0;
     lc->data_count = 0;
 
     sched_add_timer(&lc->timer);

@@ -4,7 +4,7 @@ from mcu import TRSYNC_SINGLE_MCU_TIMEOUT, TRSYNC_TIMEOUT, MCU_trsync
 import sys
 
 DEFAULT_SAMPLE_COUNT = 2
-#LoadCellEndstop implements mcu_endstop
+#LoadCellEndstop implements mcu_endstop and PrinterProbe
 class LoadCellEndstop:
     def __init__(self, config, sensor):
         self._config = config
@@ -21,14 +21,14 @@ class LoadCellEndstop:
         self._trdispatch = ffi_main.gc(ffi_lib.trdispatch_alloc(), ffi_lib.free)
         self._trsyncs = [MCU_trsync(mcu, self._trdispatch)]
         self._rest_ticks = 0
-        self.trigger_weight = config.getint("trigger_weight", default=1
-                                            , minval=1, maxval=0xffffff)
+        self.trigger_counts = 0  # this needs to be read from the conifg and maybe pushed in when the load cell calibrates
+        self.tare_counts = 0  # this needs to be pushed in every time the load cell tares
         self.sample_count = config.getint("sample_count"
             , default=DEFAULT_SAMPLE_COUNT, minval=1, maxval=5)
-        self._mcu.add_config_cmd("config_load_cell_endstop oid=%d"\
-            " trigger_weight=%i" % (self._oid, self.trigger_weight))
+        self._mcu.add_config_cmd("config_load_cell_endstop oid=%d"
+                                  % (self._oid))
         self._mcu.add_config_cmd("load_cell_endstop_home oid=%d trsync_oid=0" \
-            " trigger_reason=0 sample_count=0"
+            " trigger_reason=0 sample_count=0 trigger_counts=0 tare_counts=0"
             % (self._oid), on_restart=True)
         self._mcu.register_config_callback(self._build_config)
     def _build_config(self):
@@ -37,19 +37,27 @@ class LoadCellEndstop:
         self._query_cmd = self._mcu.lookup_query_command(
             "load_cell_endstop_query_state oid=%c", "load_cell_endstop_state" \
             " oid=%c homing=%c homing_triggered=%c is_triggered=%c" \
-            " trigger_ticks=%u sample=%i sample_ticks=%u trigger_weight=%i",
+            " trigger_ticks=%u sample=%i sample_ticks=%u",
             oid=self._oid, cq=cmd_queue)
         self._reset_cmd = self._mcu.lookup_command(
-            "reset_load_cell_endstop oid=%c trigger_weight=%i", cq=cmd_queue)
+            "reset_load_cell_endstop oid=%c trigger_counts=%u tare_counts=%i"
+            , cq=cmd_queue)
         self._home_cmd = self._mcu.lookup_command("load_cell_endstop_home" \
-            " oid=%c trsync_oid=%c trigger_reason=%c sample_count=%c"
+            " oid=%c trsync_oid=%c trigger_reason=%c sample_count=%c" \
+            " trigger_counts=%u tare_counts=%i"
             , cq=cmd_queue)
         self._load_cell = self._printer.lookup_object(self._config.get_name())
     def get_status(self, eventtime):
         return {
-            'trigger_weight': self.trigger_weight,
+            'trigger_counts': self.trigger_counts,
+            'tare_counts': self.tare_counts,
             'sample_count': self.sample_count
         }
+    def set_range(self, trigger_counts, tare_counts):
+        self.tare_counts = tare_counts
+        self.trigger_counts = abs(trigger_counts)
+        self._reset_cmd.send([self._oid, self.trigger_counts, self.tare_counts])
+        logging.info("LOAD_CELL_ENDSTOP: Range Set: trigger:counts %i, tare_counts: %i" % (self.trigger_counts, self.tare_counts))
     def get_mcu(self):
         return self._mcu
     def get_oid(self):
@@ -59,18 +67,12 @@ class LoadCellEndstop:
         for stepper in kinematics.get_steppers():
             if stepper.is_active_axis('z'):
                 self.add_stepper(stepper)
-    def reset(self):
-        self._reset_cmd.send([self._oid])
-        pause_time = float(self.settling_count) * (1. / self._load_cell.sps())
-        reactor = self._mcu.get_printer().get_reactor()
-        reactor.pause(reactor.monotonic() + pause_time)
-        logging.info("LCE: reset")
-    def reset_config(self, trigger_weight):
-        self.trigger_weight = trigger_weight
+    def reset_config(self, trigger_grams):
+        self.trigger_counts = trigger_grams * self._load_cell.counts_per_gram
         # Store results for SAVE_CONFIG
         configfile = self._printer.lookup_object('configfile')
         name = self._config_name
-        configfile.set(name, 'trigger_weight', "%.3f" % (trigger_weight,))
+        configfile.set(name, 'trigger_force_grams', "%.3f" % (trigger_grams,))
         self.reset()
     def add_stepper(self, stepper):
         trsyncs = {trsync.get_mcu(): trsync for trsync in self._trsyncs}
@@ -112,8 +114,9 @@ class LoadCellEndstop:
         ffi_lib.trdispatch_start(self._trdispatch, etrsync.REASON_HOST_REQUEST)
         # duplicode end
         logging.info("load cell endstop: START HOMING")
+        #TODO: have load_cell configure endstop with the tare and trigger counts
         self._home_cmd.send([self._oid, etrsync.get_oid()
-            , etrsync.REASON_ENDSTOP_HIT, DEFAULT_SAMPLE_COUNT]
+            , etrsync.REASON_ENDSTOP_HIT, DEFAULT_SAMPLE_COUNT, 0, 0]
             , reqclock=clock)
         return self._trigger_completion
     def home_wait(self, home_end_time):
@@ -134,7 +137,7 @@ class LoadCellEndstop:
             return home_end_time
         params = self._query_cmd.send([self._oid])
         # clear trsync from load_cell_endstop
-        self._home_cmd.send([self._oid, 0, 0, 0])
+        self._home_cmd.send([self._oid, 0, 0, 0, 0, 0])
         # The time of the first sample that triggered is in "trigger_ticks"
         next_clock = self._mcu.clock32_to_clock64(params['trigger_ticks'])
         # TODO: this is where we use Linear Regression to find the collision 
@@ -149,20 +152,14 @@ class LoadCellEndstop:
         if self._mcu.is_fileoutput():
             return 0
         params = self._query_cmd.send([self._oid], minclock=clock)
-        logging.info("load_cell_endstop_state oid=%u homing=%u homing_triggered=%u is_triggered=%u trigger_ticks=%u sample=%i sample_ticks=%u", params['oid'], params['homing'], params['homing_triggered'], params['is_triggered'], params['trigger_ticks'], params['sample'], params['ticks'])
+        logging.info("load_cell_endstop_state oid=%u homing=%u homing_triggered=%u is_triggered=%u trigger_ticks=%u sample=%i sample_ticks=%u", params['oid'], params['homing'], params['homing_triggered'], params['is_triggered'], params['trigger_ticks'], params['sample'], params['sample_ticks'])
         if params['homing'] == 1:
             return params['homing_triggered'] == 1
         else:
             return params['is_triggered'] == 1
     def multi_probe_begin(self):
-        # Before beginning probing, make sure any retract moves have completed
-        # this makes sure the retract happens before the trsync gets armed
-        toolhead = self._printer.lookup_object('toolhead')
-        toolhead.dwell(0.1)
-        toolhead.wait_moves()
-        #self.gcode.run_script_from_command("QUERY_PROBE")
+        pass
     def multi_probe_end(self):
-        #self.gcode.run_script_from_command("QUERY_PROBE")
         pass
     def probe_prepare(self, hmove):
         # Before beginning probing, make sure any retract moves have completed
