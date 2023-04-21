@@ -188,8 +188,11 @@ command_load_cell_endstop_home(uint32_t *args)
 {
     struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(args[0]);
     lce->trigger_ticks = 0;
-    lce->flags = set_flag(FLAG_IS_TRIGGERED, 0, lce->flags);
+    //lce->flags = set_flag(FLAG_IS_TRIGGERED, 0, lce->flags);
+    // clear the homing trigger flag
+    lce->flags = set_flag(FLAG_IS_HOMING_TRIGGER, 0, lce->flags);
     // 0 samples indicates homing is finished
+    // TODO: this feels dangerous, use reset for this instead!
     if (args[3] == 0) {
         // Disable end stop checking
         lce->ts = NULL;

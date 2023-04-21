@@ -96,6 +96,11 @@ class LoadCellEndstop:
                    triggered=True):
         # not used:
         sample_time = rest_time = triggered = sample_count = None
+
+        # do not permit homing if the load cell is not capturing
+        if not self._load_cell.is_capturing():
+            raise self._printer.command_error("Load Cell not capturing")
+
         # re-compute rest_time based on the sample rate
         clock = self._mcu.print_time_to_clock(print_time)
         self._rest_ticks = self._mcu.print_time_to_clock(print_time 
@@ -113,11 +118,11 @@ class LoadCellEndstop:
         ffi_main, ffi_lib = chelper.get_ffi()
         ffi_lib.trdispatch_start(self._trdispatch, etrsync.REASON_HOST_REQUEST)
         # duplicode end
-        logging.info("load cell endstop: START HOMING")
-        #TODO: have load_cell configure endstop with the tare and trigger counts
+        
         self._home_cmd.send([self._oid, etrsync.get_oid()
-            , etrsync.REASON_ENDSTOP_HIT, DEFAULT_SAMPLE_COUNT, 0, 0]
-            , reqclock=clock)
+            , etrsync.REASON_ENDSTOP_HIT, self.sample_count
+            , self.trigger_counts, self.tare_counts], reqclock=clock)
+        logging.info("LOAD_CELL_ENDSTOP: START HOMING")
         return self._trigger_completion
     def home_wait(self, home_end_time):
         etrsync = self._trsyncs[0]
@@ -125,6 +130,7 @@ class LoadCellEndstop:
         if self._mcu.is_fileoutput():
             self._trigger_completion.complete(True)
         self._trigger_completion.wait()
+        logging.info("LOAD_CELL_ENDSTOP: Endstop Triggered")
         # trigger has happened, now to find out why...
         ffi_main, ffi_lib = chelper.get_ffi()
         ffi_lib.trdispatch_stop(self._trdispatch)
@@ -135,6 +141,7 @@ class LoadCellEndstop:
             return 0.
         if self._mcu.is_fileoutput():
             return home_end_time
+        logging.info("LOAD_CELL_ENDSTOP: Trigger Is Good")
         params = self._query_cmd.send([self._oid])
         # clear trsync from load_cell_endstop
         self._home_cmd.send([self._oid, 0, 0, 0, 0, 0])
