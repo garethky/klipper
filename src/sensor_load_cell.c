@@ -1,6 +1,6 @@
-// Support for reading ADC counts from at attached load cell via SPI
+// Support Load Cell behaviour from various ADCs
 //
-// Copyright (C) 2021  Kevin O'Connor <kevin@koconnor.net>
+// Copyright (C) 2023  Gareth Farrigton <gareth@waves.ky>
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
@@ -10,35 +10,48 @@
 #include "board/irq.h" // irq_disable
 #include "command.h" // DECL_COMMAND
 #include "sched.h" // DECL_TASK
-#include "spicmds.h" // spidev_transfer
 #include "load_cell_endstop.h" // load_cell_endstop_report_sample
+#include "sensor_ads1263.h" // ads1263_query
+#include "sensor_hx71x.h" // hx711_query
 
-enum { CHIP_ADS1263, CHIP_ENUM_MAX };
+enum { SENSOR_ADS1263, SENSOR_HX71X, SENSOR_ENUM_MAX };
 
-DECL_ENUMERATION("load_cell_sensor_type", "ads1263", CHIP_ADS1263);
+DECL_ENUMERATION("load_cell_sensor_type", "ads1263", SENSOR_ADS1263);
+DECL_ENUMERATION("load_cell_sensor_type", "HX711", SENSOR_HX71X);
 
 enum { TCODE_ERROR = 0xff };
-/// SE == Sample Error ??
+
+// Sample Error Types
 enum {
-    SE_OVERFLOW, SE_SCHEDULE, SE_SPI_TIME, SE_CRC, SE_DUPELICATE
-};
-// SA == Sample Angle ??
-enum {
-    SA_PENDING = 1<<0
+    SE_OVERFLOW, SE_SCHEDULE, SE_SPI_TIME, SE_CRC, SE_DUPLICATE
 };
 
-#define MAX_SPI_READ_TIME timer_from_us(50)
+// Flag types
+enum {
+    FLAG_PENDING = 1<<0
+};
+
+// Wait Types
+enum {
+    WAIT_NEXT_SAMPLE, WAIT_SAMPLE_DUPLICATE
+};
+
 #define SAMPLE_WIDTH 5
 #define ERROR_WIDTH 2
+#define SAMPLE_NOT_READY_DELAY 1000
 
 struct load_cell {
     struct timer timer;
-    uint32_t rest_ticks;
-    struct spidev_s *spi;
     struct load_cell_endstop *load_cell_endstop;
+    struct load_cell_sample *sample;
+    // ticks between samples, determined by the sample rate
+    uint32_t sample_interval_ticks;
+    // time to wait for the next wakeup
+    uint32_t rest_ticks;
     uint16_t sequence;
-    uint8_t flags, chip_type, data_count, time_shift, overflow;
-    uint8_t data[SAMPLE_WIDTH * 3];  // dont try to send anything larger than 64 bytes over the USB bus
+    uint8_t flags, sensor_type, sensor_oid, data_count, time_shift, overflow;
+    // dont try to send anything larger than 64 bytes over the USB bus
+    uint8_t data[SAMPLE_WIDTH * 3];
 };
 
 static struct task_wake wake_load_cell;
@@ -49,10 +62,10 @@ load_cell_event(struct timer *timer)
 {
     struct load_cell *lc = container_of(timer, struct load_cell, timer);
     uint8_t flags = lc->flags;
-    if (lc->flags & SA_PENDING)
+    if (lc->flags & FLAG_PENDING)
         lc->overflow++;
     else
-        lc->flags = flags | SA_PENDING;
+        lc->flags = flags | FLAG_PENDING;
     sched_wake_task(&wake_load_cell);
     lc->timer.waketime += lc->rest_ticks;
     return SF_RESCHEDULE;
@@ -61,25 +74,22 @@ load_cell_event(struct timer *timer)
 void
 command_config_load_cell(uint32_t *args)
 {
-    uint8_t chip_type = args[2];
-    if (chip_type >= CHIP_ENUM_MAX) {
+    uint8_t sensor_type = args[1];
+    if (sensor_type >= SENSOR_ENUM_MAX) {
         shutdown("Invalid load cell sensor chip type");
     }
     struct load_cell *lc = oid_alloc(args[0], command_config_load_cell
                                      , sizeof(*lc));
     lc->timer.func = load_cell_event;
-    lc->spi = spidev_oid_lookup(args[1]);
-    if (!spidev_have_cs_pin(lc->spi))
-        shutdown("load cell sensor requires cs pin");
-    lc->chip_type = chip_type;
-    uint8_t lce_oid = args[3];
+    lc->sensor_type = sensor_type;
+    uint8_t lce_oid = args[2];
     // optional endstop
     if (lce_oid != 0) {
         lc->load_cell_endstop = load_cell_endstop_oid_lookup(lce_oid);;
     }
 }
 DECL_COMMAND(command_config_load_cell,
-             "config_load_cell oid=%c spi_oid=%c load_cell_sensor_type=%c"
+             "config_load_cell oid=%c sensor_type=%c senor_oid=%c"
              " load_cell_endstop_oid=%c");
 
 // Report local measurement buffer
@@ -136,8 +146,10 @@ add_load_cell_data(struct load_cell *lc, uint32_t stime, uint32_t mtime
                , int32_t sample)
 {
     uint32_t tdiff = mtime - stime;
-    if (lc->time_shift)
+    if (lc->time_shift) {
         tdiff = (tdiff + (1<<(lc->time_shift - 1))) >> lc->time_shift;
+    }
+
     if (tdiff >= TCODE_ERROR) {
         add_load_cell_error(lc, SE_SCHEDULE);
         return;
@@ -150,39 +162,6 @@ add_load_cell_data(struct load_cell *lc, uint32_t stime, uint32_t mtime
     }
 
     append_load_cell_measurement(lc, tdiff, sample);
-}
-
-// ads1263 sensor query
-static void
-ads1263_query(struct load_cell *lc, uint32_t stime)
-{
-    uint8_t msg[7] = { 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-    uint32_t measurement_time = timer_read_time();
-    spidev_transfer(lc->spi, 1, sizeof(msg), msg);
-    uint32_t read_end_time = timer_read_time();
-
-    // check the status byte to see if the chip reset
-    if ((msg[1] & 0x1) == 1) {
-        shutdown("ADS1263 Reported an unexpected reset while sampling!");
-    }
-    // check the status byte to see if the data is fresh, if not ignore
-    else if ((msg[1] & 0x40) == 0) {
-        add_load_cell_error(lc, SE_DUPELICATE);
-        return;
-    }
-    // check for a timing error
-    else if (read_end_time - measurement_time > MAX_SPI_READ_TIME) {
-        add_load_cell_error(lc, SE_SPI_TIME);
-        return;
-    }
-
-    // TODO: perform CRC check
-    // uint8_t crc = msg[6]
-    // else if (!test_crc(msg, crc))
-    //   add_load_cell_error(lc, SE_CRC);
-
-    int32_t sample = (msg[2] << 24) | (msg[3] << 16) | (msg[4] << 8) | msg[5];
-    add_load_cell_data(lc, stime, measurement_time, sample);
 }
 
 // start/stop capturing load cell data
@@ -207,6 +186,7 @@ command_query_load_cell(uint32_t *args)
     }
     // Start new measurements query
     lc->timer.waketime = args[1];
+    lc->sample_interval_ticks = args[2];
     lc->rest_ticks = args[2];
     lc->time_shift = args[3];
     lc->sequence = 0;
@@ -227,7 +207,7 @@ load_cell_capture_task(void)
     struct load_cell *lc;
     foreach_oid(oid, lc, command_config_load_cell) {
         uint_fast8_t flags = lc->flags;
-        if (!(flags & SA_PENDING))
+        if (!(flags & FLAG_PENDING))
             continue;
         irq_disable();
         uint32_t stime = lc->timer.waketime;
@@ -240,9 +220,32 @@ load_cell_capture_task(void)
             add_load_cell_error(lc, SE_OVERFLOW);
             flush_if_full(lc, oid);
         }
-        uint_fast8_t chip = lc->chip_type;
-        if (chip == CHIP_ADS1263) {
-            ads1263_query(lc, stime);
+        
+        uint_fast8_t chip = lc->sensor_type;
+        struct load_cell_sample *sample = lc->sample;
+        if (chip == SENSOR_ADS1263) {
+            struct ads1263_sensor *ads = ads1263_oid_lookup(lc->sensor_oid);
+            ads1263_query(ads, sample);
+        } else if (chip == SENSOR_HX71X) {
+            struct hx71x_sensor *hx = hx71x_oid_lookup(lc->sensor_oid);
+            hx71x_query(hx, sample);
+        }
+
+        if (sample->timing_error == 1) {
+            add_load_cell_error(lc, SE_SPI_TIME);
+        } else if (sample->crc_error == 1) {
+            add_load_cell_error(lc, SE_CRC);
+        } else if (sample->is_duplicate == 1) {
+            add_load_cell_error(lc, SE_DUPLICATE);
+        } else {
+            add_load_cell_data(lc, stime, sample->measurement_time
+                                    , sample->counts);
+        }
+
+        if (sample->is_duplicate == 0) {
+            lc->rest_ticks = lc->sample_interval_ticks;
+        } else {
+            lc->rest_ticks = timer_from_us(SAMPLE_NOT_READY_DELAY);
         }
         flush_if_full(lc, oid);
     }
