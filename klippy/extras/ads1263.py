@@ -1,6 +1,6 @@
 # ADS1262/1263 ADC Support
 #
-# Copyright (C) 2022 Gareth Farrington <gareth@waves.ky>
+# Copyright (C) 2023 Gareth Farrington <gareth@waves.ky>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import math
@@ -335,15 +335,17 @@ class ADS1263(load_cell.LoadCellSensor):
         self.printer = printer = config.get_printer()
         self.reactor = printer.get_reactor()
         # Setup SPI communications on the MCU hosting the sensor
-        self.spi = bus.MCU_SPI_from_config(config, 1, default_speed=25000000)
-        self.mcu = self.spi.get_mcu()
+        self.spi = spi = bus.MCU_SPI_from_config(config, 1, default_speed=25000000)
+        self.mcu = mcu = self.spi.get_mcu()
+        self.oid = oid = mcu.create_oid()
+        mcu.add_config_cmd("config_sensor_ads1263 oid=%d spi_oid=%d"
+            % (oid, spi.get_oid()))
         self.is_capturing = False
         self.gain = config.getint('gain', minval=0, maxval=5, default=0)
-        # 400 SPS
+        # 8 = 400 SPS
         self.samples_per_second = config.getint('sample_rate', minval=0
                                                      , maxval=15, default=8)
         #TODO: read the rest of the properties from the config
-        self.vref = 2.5
         ADS1263CommandHelper(config, self)
         printer.register_event_handler("klippy:firmware_restart", self._connect)
         printer.register_event_handler("klippy:connect", self._connect)
@@ -351,11 +353,11 @@ class ADS1263(load_cell.LoadCellSensor):
         self.reset()
         self.configure(gain = self.gain, rate=self.samples_per_second)
     # LoadCellDataSource methods
-    def get_spi(self):
-        return self.spi
+    def get_oid(self):
+        return self.oid
     def get_mcu(self):
         return self.mcu
-    def get_capture_name(self):
+    def get_sensor_name(self):
         return "ads1263"
     def get_samples_per_second(self):
         return SAMPLES_PER_S[self.samples_per_second]

@@ -3,6 +3,7 @@
 
 #include <stdint.h> // uint8_t
 
+// struct to contain the results of a sensor being read
 struct load_cell_sample {
     uint32_t measurement_time;
     int32_t counts;

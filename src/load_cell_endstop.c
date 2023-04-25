@@ -1,6 +1,6 @@
 // Load Cell based end stops.
 //
-// Copyright (C) 2016-2021  Gareth Farrington <gareth@waves.ky>
+// Copyright (C) 2023  Gareth Farrington <gareth@waves.ky>
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
@@ -10,6 +10,9 @@
 #include "trsync.h" // trsync_do_trigger
 #include "sched.h" // shutdown
 #include "load_cell_endstop.h" //load_cell_endstop_report_sample
+
+// TODO
+// Add watchdog timer that faults after 2 sample periods with no new sample
 
 const uint8_t DEFAULT_SAMPLE_COUNT = 2;
 
@@ -115,9 +118,8 @@ load_cell_endstop_report_error(struct load_cell_endstop *lce, uint8_t error_code
         else if (error_code == 3) {
             shutdown("load_cell_endstop: Sensor reported an error while homing: SE_CRC");
         }
-        // TODO: clean this up so its a reference to SE_DUPELICATE
         else if (error_code == 4) {
-            return;
+            return;  // duplicate errors are OK
         }
         else {
             shutdown("load_cell_endstop: Sensor reported an error while homing: UNKNOWN");

@@ -121,16 +121,21 @@ hx71x_query(struct hx71x_sensor *hx71x, struct load_cell_sample *sample)
     sample->counts = (counts >= 0x800000) ? (counts | 0xFF000000) : counts;
 }
 
-// Create a hx71x sensor
+// Create an hx71x sensor
 void
 command_config_hx71x(uint32_t *args)
 {
     struct hx71x_sensor *hx71x = oid_alloc(args[0]
                             , command_config_hx71x, sizeof(*hx71x));
-    hx71x->gain_channel = 1;
+    hx71x->dout = gpio_in_setup(args[1], -1); // enable pulldown
+    hx71x->sclk = gpio_out_setup(args[2], 0); // initialize as low
+    if (gain_channel < 1 || gain_channel > 4) {
+        shutdown("HX71x gain/channel out of range");
+    }
+    hx71x->gain_channel = gain_channel;
 }
-DECL_COMMAND(command_config_hx71x, "config_hx71x oid=%c");
-
+DECL_COMMAND(command_config_hx71x, "config_hx71x oid=%c dout_pin=%u" \
+                                    " sclk_pin=%u gain_channel=%c");
 
 // Lookup a look up an hx71x sensor instance by oid
 struct hx71x_sensor *

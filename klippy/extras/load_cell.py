@@ -28,11 +28,14 @@ def average(data, points=None):
 
 # Interface for Sensors that want to supply data to run a Load Cell
 class LoadCellSensor:
-    # return the spi object for the sensor
-    def get_spi(self):
+    # return the oid for looking up the sensor on the MCU
+    def get_oid(self):
         pass
-    # return the name for looking up the capture routine in firmware
-    def get_capture_name(self):
+    # return the name for looking up the sensor on the MCU
+    def get_senor_type(self):
+        pass
+    # get the MCU where the sensor is
+    def get_mcu(self):
         pass
     # start sensor capture
     def start_capture(self):
@@ -304,15 +307,15 @@ class LoadCell:
             self.load_cell_endstop_oid = load_cell_endstop.get_oid()
             # TODO: get the trigger_force into the load_cell_endstop
         # Setup mcu sensor_load_cell bulk query code
-        self.mcu = mcu = self.sensor.get_spi().get_mcu()
+        self.mcu = mcu = self.sensor.get_mcu()
         self.oid = oid = mcu.create_oid()
-        spi_oid = self.sensor.get_spi().get_oid()
+        pi_oid = self.sensor.get_spi().get_oid()
         self.samples = None
         self.trigger_force_grams = config.getfloat('trigger_force_grams'
                                                    , minval=10., default=10.)
-        mcu.add_config_cmd("config_load_cell oid=%d spi_oid=%d \
-                            load_cell_sensor_type=%s load_cell_endstop_oid=%d"
-            % (oid, spi_oid, self.sensor.get_capture_name()
+        mcu.add_config_cmd("config_load_cell oid=%d sensor_type=%s \
+                            sensor_oid=%d load_cell_endstop_oid=%d"
+            % (oid, self.sensor.get_capture_name(), self.sensor.get_oid()
             , self.load_cell_endstop_oid))
         mcu.add_config_cmd(
             "query_load_cell oid=%d clock=0 rest_ticks=0 time_shift=0"
