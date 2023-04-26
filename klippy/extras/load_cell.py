@@ -28,13 +28,13 @@ def average(data, points=None):
 
 # Interface for Sensors that want to supply data to run a Load Cell
 class LoadCellSensor:
-    # return the oid for looking up the sensor on the MCU
+    # return the oid for looking up the sensor by oid on the MCU
     def get_oid(self):
         pass
-    # return the name for looking up the sensor on the MCU
-    def get_senor_type(self):
+    # return the name for looking up the sensor type on the MCU
+    def get_load_cell_sensor_type(self):
         pass
-    # get the MCU where the sensor is
+    # get the MCU where the sensor is physically connected
     def get_mcu(self):
         pass
     # start sensor capture
@@ -60,9 +60,9 @@ MIN_MSG_TIME = 0.100
 TCODE_ERROR = 0xff
 ERROR_OVERFLOW = 0
 ERROR_SCHEDULE = 1
-ERROR_SPI_TIME = 2
+ERROR_READ_TIME = 2
 ERROR_CRC = 3
-ERROR_DUPELICATE = 4
+ERROR_DUPLICATE = 4
 MAX_SAMPLES = 16
 
 class LoadCellCaptureHelper:
@@ -71,7 +71,7 @@ class LoadCellCaptureHelper:
         self.load_cell = load_cell
         self.oid = oid = load_cell.oid
         self.sensor = load_cell.sensor
-        self.mcu = mcu = self.sensor.get_spi().get_mcu()
+        self.mcu = mcu = self.sensor.get_mcu()
         self.lock = threading.Lock()
         self.last_sequence = 0
         # Capture message storage (accessed from background thread)
@@ -91,15 +91,18 @@ class LoadCellCaptureHelper:
         while (float(TCODE_ERROR << self.time_shift) / freq) < 0.002:
             self.time_shift += 1
         mcu.register_response(self._add_samples, "load_cell_data", oid)
-        cmdqueue = self.sensor.get_spi().get_command_queue()
+        #cmdqueue = self.sensor.get_spi().get_command_queue()
         query = "query_load_cell oid=%c clock=%u rest_ticks=%u time_shift=%c"
         query_end = "load_cell_end oid=%c sequence=%hu"
-        self.query_load_cell_cmd = self.mcu.lookup_command(query, cq=cmdqueue)
+        self.query_load_cell_cmd = self.mcu.lookup_command(query)#, cq=cmdqueue)
         self.query_load_cell_end_cmd = self.mcu.lookup_query_command(
-            query, query_end, oid=oid, cq=cmdqueue)
+            query, query_end, oid=oid)#, cq=cmdqueue)
     def _add_samples(self, new_capture):
         with self.lock:
             self.capture_buffer.append(new_capture)
+        # DEBUG
+        d = bytearray(new_capture['data'])
+        logging.info("Load Cell Samples: %s (%i)", hexify(d), len(d))
     def empty_buffer(self):
         with self.lock:
             last_batch = self.capture_buffer
@@ -130,14 +133,18 @@ class LoadCellCaptureHelper:
     def _extract_int32(self, b, i):
         value = struct.unpack_from('<i', b, offset=i)[0]
         return (value, i + 4)
-    def _process_error(self, data, i, error_count, duplicate_count):
+    def _process_error(self, data, i, read_time_errors, crc_errors, error_count, duplicate_count):
         error, i = self._extract_byte(data, i)
         # this implementation supports over-sampling
-        if error == ERROR_DUPELICATE:
+        if error == ERROR_DUPLICATE:
             duplicate_count += 1
+        elif error == ERROR_CRC:
+            crc_errors += 1
+        elif error == ERROR_READ_TIME:
+            read_time_errors += 1
         else:
             error_count += 1
-        return error_count, duplicate_count, i
+        return read_time_errors, crc_errors, error_count, duplicate_count, i
     def flush(self):
         raw_samples = self.empty_buffer()
         # Load variables to optimize inner loop below
@@ -149,7 +156,7 @@ class LoadCellCaptureHelper:
         # this isn't thread protected....
         last_sequence = self.last_sequence
         # Process every message in raw_samples
-        count = error_count = duplicate_count = 0
+        count = error_count = read_time_errors = crc_errors  = duplicate_count = 0
         samples = [None] * (len(raw_samples) * MAX_SAMPLES)
         for params in raw_samples:
             seq = (last_sequence & ~0xffff) | params['sequence']
@@ -164,7 +171,7 @@ class LoadCellCaptureHelper:
                 while i < data_len:
                     tcode, i = self._extract_byte(d, i)
                     if tcode == TCODE_ERROR:
-                        error_count, duplicate_count, i = self._process_error(d, i, error_count, duplicate_count)
+                        read_time_errors, crc_errors, error_count, duplicate_count, i = self._process_error(d, i, read_time_errors, crc_errors, error_count, duplicate_count)
                     else:
                         sample, i = self._extract_int32(d, i)
                         mclock = msg_mclock + (i * sample_ticks)
@@ -174,11 +181,11 @@ class LoadCellCaptureHelper:
                         samples[count] = (ptime, sample)
                         count += 1
             except Exception:
-                logging.exception("Load Cell Samples threw an error: %s (%i) i: %i, e: %i, d: %i", hexify(d), data_len, i, error_count, duplicate_count)
+                logging.exception("Load Cell Samples threw an error: %s (%i) i: %i, read_time_error: %i, crc_errors: %i, unknown_errors: %i, d: %i", hexify(d), data_len, i, read_time_errors, crc_errors, error_count, duplicate_count)
         self.last_sequence = last_sequence
         # trim empty entries from the end of the list
         del samples[count:]
-        #logging.info("GOT SAMPLES: %i, %i, ERRORS: %i, duplicates: %i" % (count, len(samples), error_count, duplicate_count))
+        logging.info("GOT SAMPLES: %i, %i, read_time_error: %i, crc_errors: %i, unknown_errors: %i, duplicates: %i" % (count, len(samples), read_time_errors, crc_errors, error_count, duplicate_count))
         return samples, error_count, duplicate_count
 
 from numpy import std
@@ -201,16 +208,13 @@ class LoadCellCommandHelper:
         gcode.register_mux_command("STOP_LOAD_CELL_CAPTURE", "LOAD_CELL", name,
                                    self.cmd_STOP_LOAD_CELL_CAPTURE,
                                    desc=self.cmd_STOP_LOAD_CELL_CAPTURE_help)
-        gcode.register_mux_command("TARE_LOAD_CELL", "LOAD_CELL",
-                                   name,
+        gcode.register_mux_command("TARE_LOAD_CELL", "LOAD_CELL", name,
                                    self.cmd_TARE_LOAD_CELL,
                                    desc=self.cmd_TARE_LOAD_CELL_help)
-        gcode.register_mux_command("CALIBRATE_LOAD_CELL", "LOAD_CELL",
-                                   name,
+        gcode.register_mux_command("CALIBRATE_LOAD_CELL", "LOAD_CELL", name,
                                    self.cmd_CALIBRATE_LOAD_CELL,
                                    desc=self.cmd_CALIBRATE_LOAD_CELL_help)
-        gcode.register_mux_command("READ_LOAD_CELL", "LOAD_CELL",
-                                   name,
+        gcode.register_mux_command("READ_LOAD_CELL", "LOAD_CELL", name,
                                    self.cmd_READ_LOAD_CELL,
                                    desc=self.cmd_READ_LOAD_CELL_help)
     cmd_START_LOAD_CELL_CAPTURE_help = "Start Load Cell capture"
@@ -305,18 +309,20 @@ class LoadCell:
         self.load_cell_endstop_oid = 0
         if load_cell_endstop is not None:
             self.load_cell_endstop_oid = load_cell_endstop.get_oid()
-            # TODO: get the trigger_force into the load_cell_endstop
         # Setup mcu sensor_load_cell bulk query code
         self.mcu = mcu = self.sensor.get_mcu()
         self.oid = oid = mcu.create_oid()
-        pi_oid = self.sensor.get_spi().get_oid()
         self.samples = None
         self.trigger_force_grams = config.getfloat('trigger_force_grams'
                                                    , minval=10., default=10.)
-        mcu.add_config_cmd("config_load_cell oid=%d sensor_type=%s \
+        logging.info("DEBUG: config_load_cell oid=%d load_cell_sensor_type=%s \
                             sensor_oid=%d load_cell_endstop_oid=%d"
-            % (oid, self.sensor.get_capture_name(), self.sensor.get_oid()
-            , self.load_cell_endstop_oid))
+            % (oid, self.sensor.get_load_cell_sensor_type()
+               , self.sensor.get_oid(), self.load_cell_endstop_oid))
+        mcu.add_config_cmd("config_load_cell oid=%d load_cell_sensor_type=%s \
+                            sensor_oid=%d load_cell_endstop_oid=%d"
+            % (oid, self.sensor.get_load_cell_sensor_type()
+               , self.sensor.get_oid(), self.load_cell_endstop_oid))
         mcu.add_config_cmd(
             "query_load_cell oid=%d clock=0 rest_ticks=0 time_shift=0"
             % (oid,), on_restart=True)
@@ -417,6 +423,7 @@ def load_config(config):
     else:
         name = ""
     if config.getboolean('is_probe', default=False):
+        logging.info("CREATING ENDSTOP mcu:%s" % sensor.get_mcu())
         endstop = LoadCellEndstop(config, sensor)
         printer.add_object('load_cell_endstop' + name, endstop)
         printer.add_object('load_cell_probe' + name

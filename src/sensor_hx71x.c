@@ -129,6 +129,7 @@ command_config_hx71x(uint32_t *args)
                             , command_config_hx71x, sizeof(*hx71x));
     hx71x->dout = gpio_in_setup(args[1], -1); // enable pulldown
     hx71x->sclk = gpio_out_setup(args[2], 0); // initialize as low
+    uint8_t gain_channel = args[3];
     if (gain_channel < 1 || gain_channel > 4) {
         shutdown("HX71x gain/channel out of range");
     }

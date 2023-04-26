@@ -17,13 +17,13 @@
 enum { SENSOR_ADS1263, SENSOR_HX71X, SENSOR_ENUM_MAX };
 
 DECL_ENUMERATION("load_cell_sensor_type", "ads1263", SENSOR_ADS1263);
-DECL_ENUMERATION("load_cell_sensor_type", "HX711", SENSOR_HX71X);
+DECL_ENUMERATION("load_cell_sensor_type", "hx71x", SENSOR_HX71X);
 
 enum { TCODE_ERROR = 0xff };
 
 // Sample Error Types
 enum {
-    SE_OVERFLOW, SE_SCHEDULE, SE_SPI_TIME, SE_CRC, SE_DUPLICATE
+    SE_OVERFLOW, SE_SCHEDULE, SE_READ_TIME, SE_CRC, SE_DUPLICATE
 };
 
 // Flag types
@@ -43,7 +43,7 @@ enum {
 struct load_cell {
     struct timer timer;
     struct load_cell_endstop *load_cell_endstop;
-    struct load_cell_sample *sample;
+    struct load_cell_sample sample;
     // ticks between samples, determined by the sample rate of the sensor
     uint32_t sample_interval_ticks;
     // time to wait for the next wakeup
@@ -112,13 +112,15 @@ add_load_cell_error(struct load_cell *lc, uint8_t error_code)
 // Add a measurement to the buffer
 static void
 add_load_cell_data(struct load_cell *lc, uint32_t stime, uint32_t mtime
-               , int32_t sample)
+               , int32_t counts)
 {
     uint32_t tdiff = mtime - stime;
     if (lc->time_shift) {
         tdiff = (tdiff + (1<<(lc->time_shift - 1))) >> lc->time_shift;
     }
 
+    // if the time difference between when the sample was requested and 
+    // when it was taken exceeds 0xFF its unusable
     if (tdiff >= TCODE_ERROR) {
         add_load_cell_error(lc, SE_SCHEDULE);
         return;
@@ -126,44 +128,44 @@ add_load_cell_data(struct load_cell *lc, uint32_t stime, uint32_t mtime
 
     // endstop is optional, report if enabled
     if (lc->load_cell_endstop) {
-        load_cell_endstop_report_sample(lc->load_cell_endstop, sample
+        load_cell_endstop_report_sample(lc->load_cell_endstop, counts
                                             , mtime);
     }
 
-    append_load_cell_measurement(lc, tdiff, sample);
+    append_load_cell_measurement(lc, tdiff, counts);
 }
 
-// use the contents of the sample struct to report
+// use the contents of the sample container to report
 static void 
-add_sensor_result(struct load_cell_sample *sample) {
+add_sensor_result(struct load_cell *lc, uint32_t stime) {
     // publish the results of the read
-    if (sample->timing_error == 1) {
-        add_load_cell_error(lc, SE_SPI_TIME);
-    } else if (sample->crc_error == 1) {
+    if (lc->sample.timing_error) {
+        add_load_cell_error(lc, SE_READ_TIME);
+    } else if (lc->sample.crc_error) {
         add_load_cell_error(lc, SE_CRC);
-    } else if (sample->is_duplicate == 1) {
+    } else if (lc->sample.is_duplicate) {
         add_load_cell_error(lc, SE_DUPLICATE);
     } else {
-        add_load_cell_data(lc, stime, sample->measurement_time, sample->counts);
+        add_load_cell_data(lc, stime, lc->sample.measurement_time
+        , lc->sample.counts);
     }
 }
 
 void read_sensor(struct load_cell *lc) {
     // clear sample container
-    struct load_cell_sample *sample = lc->sample;
-    sample->timing_error = 0;
-    sample->crc_error = 0;
-    sample->is_duplicate = 0;
-    sample->measurement_time = 0;
-    sample->counts = 0;
+    lc->sample.timing_error = 0;
+    lc->sample.crc_error = 0;
+    lc->sample.is_duplicate = 0;
+    lc->sample.measurement_time = 0;
+    lc->sample.counts = 0;
 
     // read from the configured sensor
     if (lc->sensor_type == SENSOR_ADS1263) {
         struct ads1263_sensor *ads = ads1263_oid_lookup(lc->sensor_oid);
-        ads1263_query(ads, sample);
+        ads1263_query(ads, &lc->sample);
     } else if (lc->sensor_type == SENSOR_HX71X) {
         struct hx71x_sensor *hx = hx71x_oid_lookup(lc->sensor_oid);
-        hx71x_query(hx, sample);
+        hx71x_query(hx, &lc->sample);
     }
 }
 
@@ -171,7 +173,6 @@ void read_sensor(struct load_cell *lc) {
 static void
 flush_if_full(struct load_cell *lc, uint8_t oid)
 {
-    // Send load_cell_data message if buffer is full
     if ((lc->data_count + SAMPLE_WIDTH - 1) > ARRAY_SIZE(lc->data)) {
         load_cell_report(lc, oid);
     }
@@ -180,23 +181,23 @@ flush_if_full(struct load_cell *lc, uint8_t oid)
 void
 command_config_load_cell(uint32_t *args)
 {
-    uint8_t sensor_type = args[1];
-    if (sensor_type >= SENSOR_ENUM_MAX) {
-        shutdown("Invalid load cell sensor type");
-    }
+    
     struct load_cell *lc = oid_alloc(args[0], command_config_load_cell
                                      , sizeof(*lc));
     lc->timer.func = load_cell_event;
-    lc->sensor_type = sensor_type;
-    uint8_t lce_oid = args[2];
+    lc->sensor_type = args[1];
+    if (lc->sensor_type >= SENSOR_ENUM_MAX) {
+        shutdown("Invalid load cell sensor type");
+    }
+    lc->sensor_oid = args[2];
+    uint8_t lce_oid = args[3];
     // optional endstop
     if (lce_oid != 0) {
         lc->load_cell_endstop = load_cell_endstop_oid_lookup(lce_oid);
     }
 }
-DECL_COMMAND(command_config_load_cell,
-             "config_load_cell oid=%c sensor_type=%c senor_oid=%c"
-             " load_cell_endstop_oid=%c");
+DECL_COMMAND(command_config_load_cell, "config_load_cell oid=%c"
+            " load_cell_sensor_type=%c sensor_oid=%c load_cell_endstop_oid=%c");
 
 // start/stop capturing load cell data
 void
@@ -228,7 +229,7 @@ command_query_load_cell(uint32_t *args)
 
     // this reads the sensor and clears its "ready" state
     // the next read should be a duplicate allowing for closer timing
-    read_sensor(lc, );
+    read_sensor(lc);
     sched_add_timer(&lc->timer);
 }
 DECL_COMMAND(command_query_load_cell,
@@ -258,11 +259,11 @@ load_cell_capture_task(void)
             flush_if_full(lc, oid);
         }
         read_sensor(lc);
-        add_sensor_result(lc);
+        add_sensor_result(lc, stime);
         flush_if_full(lc, oid);
 
         // if a sample was not ready, poll more frequently until one is
-        if (lc->sample->is_duplicate == 1) {
+        if (lc->sample.is_duplicate == 1) {
             lc->rest_ticks = SAMPLE_NOT_READY_DELAY;
         } else {
             lc->rest_ticks = lc->sample_interval_ticks;

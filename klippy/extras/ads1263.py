@@ -338,7 +338,7 @@ class ADS1263(load_cell.LoadCellSensor):
         self.spi = spi = bus.MCU_SPI_from_config(config, 1, default_speed=25000000)
         self.mcu = mcu = self.spi.get_mcu()
         self.oid = oid = mcu.create_oid()
-        mcu.add_config_cmd("config_sensor_ads1263 oid=%d spi_oid=%d"
+        mcu.add_config_cmd("config_ads1263 oid=%d spi_oid=%d"
             % (oid, spi.get_oid()))
         self.is_capturing = False
         self.gain = config.getint('gain', minval=0, maxval=5, default=0)
@@ -357,7 +357,7 @@ class ADS1263(load_cell.LoadCellSensor):
         return self.oid
     def get_mcu(self):
         return self.mcu
-    def get_sensor_name(self):
+    def get_load_cell_sensor_type(self):
         return "ads1263"
     def get_samples_per_second(self):
         return SAMPLES_PER_S[self.samples_per_second]
