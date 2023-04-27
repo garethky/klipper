@@ -75,7 +75,7 @@ hx71x_delay(hx71x_time_t start, hx71x_time_t ticks)
 /****************************************************************
  * HX711 and HX717 Support
  ****************************************************************/
-#define MIN_PULSE_TIME  nsecs_to_ticks(201)
+#define MIN_PULSE_TIME  nsecs_to_ticks(200)
 #define MAX_READ_TIME timer_from_us(50)
 
 // xh71x ADC query
@@ -98,8 +98,8 @@ hx71x_query(struct hx71x_sensor *hx71x, struct load_cell_sample *sample)
         gpio_out_write(hx71x->sclk, 0);
         irq_enable();
         hx71x_delay(hx71x_get_time(), MIN_PULSE_TIME);
-        // read 2's compliment int into high bits
-        counts = (counts << 1) | gpio_in_read(hx71x->dout);
+        // read 2's compliment int bits
+        sample->counts = (counts << 1) | gpio_in_read(hx71x->dout);
     }
 
     // bit bang 1 to 4 more bits to configure gain & channel for the next sample
@@ -117,8 +117,9 @@ hx71x_query(struct hx71x_sensor *hx71x, struct load_cell_sample *sample)
         return;
     }
 
-    //convert 24 bit signed to 32 bit signed
-    sample->counts = (counts >= 0x800000) ? (counts | 0xFF000000) : counts;
+    if (sample->counts >= 0x800000) { 
+        sample->counts |= 0xFF000000;
+    }
 }
 
 // Create an hx71x sensor
@@ -127,8 +128,8 @@ command_config_hx71x(uint32_t *args)
 {
     struct hx71x_sensor *hx71x = oid_alloc(args[0]
                             , command_config_hx71x, sizeof(*hx71x));
-    hx71x->dout = gpio_in_setup(args[1], -1); // enable pulldown
-    hx71x->sclk = gpio_out_setup(args[2], 0); // initialize as low
+    hx71x->dout = gpio_in_setup(args[1], 0);
+    hx71x->sclk = gpio_out_setup(args[2], 0);
     uint8_t gain_channel = args[3];
     if (gain_channel < 1 || gain_channel > 4) {
         shutdown("HX71x gain/channel out of range");
