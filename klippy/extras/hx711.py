@@ -47,8 +47,5 @@ class HX711(load_cell.LoadCellSensor):
     def get_samples_per_second(self):
         return self.sps
 
-def load_config(config):
-    return HX711(config)
-
 def load_config_prefix(config):
     return HX711(config)

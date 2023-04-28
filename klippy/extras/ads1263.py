@@ -471,8 +471,5 @@ class ADS1263(load_cell.LoadCellSensor):
                         reg, val_hex, stored_hex))
         return stored_val
 
-def load_config(config):
-    return ADS1263(config)
-
 def load_config_prefix(config):
     return ADS1263(config)

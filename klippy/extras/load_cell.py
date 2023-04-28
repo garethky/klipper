@@ -296,19 +296,29 @@ class LoadCellSampleCollector(LoadCellSubscriber):
 UPDATE_INTERVAL = .5
 # Printer class that controls the load cell
 class LoadCell:
-    def __init__(self, config, sensor, load_cell_endstop):
+    def __init__(self, config):
         self.printer = printer = config.get_printer()
+        name = config.get_name()
+        name_parts = name.split()
+        sensor_name = ' '.join(name.split()[1:])
+        self.sensor = sensor = printer.lookup_object(sensor_name)
+        self.load_cell_endstop = None
+        self.load_cell_endstop_oid = 0
+        if config.getboolean('is_probe', default=False):
+            full_name = ":".join(name_parts)
+            logging.info("DEBUG: " + full_name)
+            self.load_cell_endstop = LoadCellEndstop(config, sensor)
+            printer.add_object('load_cell_endstop:' + full_name
+                            , self.load_cell_endstop)
+            printer.add_object('load_cell_probe:' + full_name
+                            , PrinterProbe(config, self.load_cell_endstop))
+            self.load_cell_endstop_oid = self.load_cell_endstop.get_oid()
         # sensor must implement LoadCellDataSource
-        self.sensor = sensor
         self.tare_counts = None
         self.counts_per_gram = config.getint('counts_per_gram', minval=1
                                             , default=None)
         self.is_calibrated = not self.counts_per_gram is None
         LoadCellCommandHelper(config, self)
-        self.load_cell_endstop = load_cell_endstop
-        self.load_cell_endstop_oid = 0
-        if load_cell_endstop is not None:
-            self.load_cell_endstop_oid = load_cell_endstop.get_oid()
         # Setup mcu sensor_load_cell bulk query code
         self.mcu = mcu = self.sensor.get_mcu()
         self.oid = oid = mcu.create_oid()
@@ -413,23 +423,5 @@ class LoadCell:
     def get_collector(self):
         return LoadCellSampleCollector(self, self.printer.get_reactor())
 
-def load_config(config):
-    printer = config.get_printer()
-    sensor = printer.lookup_object(config.get('sensor'))
-    name = config.get_name().split()
-    endstop = None
-    if (len(name) == 2):
-        name = " " + name[1]
-    else:
-        name = ""
-    if config.getboolean('is_probe', default=False):
-        logging.info("CREATING ENDSTOP mcu:%s" % sensor.get_mcu())
-        endstop = LoadCellEndstop(config, sensor)
-        printer.add_object('load_cell_endstop' + name, endstop)
-        printer.add_object('load_cell_probe' + name
-                           , PrinterProbe(config, endstop))
-    return LoadCell(config, sensor, endstop)
-
 def load_config_prefix(config):
-    #TODO: re-implement name support
     return LoadCell(config)
