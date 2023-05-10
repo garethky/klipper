@@ -17,7 +17,7 @@
 
 // ads1263 sensor query
 void
-ads1263_query(struct ads1263_sensor *ads, struct load_cell_sample *sample)
+ads1263_query(struct ads1263_sensor *ads, struct mux_adc_sample *sample)
 {
     uint8_t msg[7] = { 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
     uint32_t measurement_time = timer_read_time();
@@ -30,7 +30,7 @@ ads1263_query(struct ads1263_sensor *ads, struct load_cell_sample *sample)
     }
     // check the status byte to see if the data is fresh, if not ignore
     else if ((msg[1] & 0x40) == 0) {
-        sample->is_duplicate = 1;
+        sample->sample_not_ready = 1;
         return;
     }
     // check for a timing error

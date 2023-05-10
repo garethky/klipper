@@ -2,7 +2,7 @@
 
 src-y += sched.c command.c basecmd.c debugcmds.c
 src-$(CONFIG_HAVE_GPIO) += initial_pins.c gpiocmds.c stepper.c endstop.c \
-    trsync.c sensor_load_cell.c load_cell_endstop.c
+    trsync.c sensor_multiplex_adc.c load_cell_endstop.c
 src-$(CONFIG_HAVE_GPIO_ADC) += adccmds.c
 src-$(CONFIG_HAVE_GPIO_SPI) += spicmds.c
 src-$(CONFIG_HAVE_GPIO_SDIO) += sdiocmds.c

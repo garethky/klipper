@@ -80,11 +80,10 @@ hx71x_delay(hx71x_time_t start, hx71x_time_t ticks)
 
 // xh71x ADC query
 void
-hx71x_query(struct hx71x_sensor *hx71x, struct load_cell_sample *sample)
+hx71x_query(struct hx71x_sensor *hx71x, struct mux_adc_sample *sample)
 {
     if (gpio_in_read(hx71x->dout)) {
-        // no new data available
-        sample->is_duplicate = 1;
+        sample->sample_not_ready = 1;
         return;
     }
 

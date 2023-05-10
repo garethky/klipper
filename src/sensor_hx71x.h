@@ -2,7 +2,7 @@
 #define __HX71X_H
 
 #include <stdint.h> // uint8_t
-#include "sensor_load_cell.h" // struct load_cell_sample
+#include "sensor_multiplex_adc.h" // struct mux_adc_sample
 
 struct hx71x_sensor {
     struct gpio_in  dout;   // pin used to receive data from the hx71x
@@ -11,6 +11,6 @@ struct hx71x_sensor {
 };
 struct hx71x_sensor *hx71x_oid_lookup(uint8_t oid);
 void hx71x_query(struct hx71x_sensor *hx71x_sensor
-                            , struct load_cell_sample *sample);
+                            , struct mux_adc_sample *sample);
 
 #endif // sensor_hx71x.h

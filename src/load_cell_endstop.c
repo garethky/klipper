@@ -102,27 +102,33 @@ load_cell_endstop_report_sample(struct load_cell_endstop *lce, int32_t sample
 }
 
 void
-load_cell_endstop_report_error(struct load_cell_endstop *lce, uint8_t error_code)
+load_cell_endstop_report_error(struct load_cell_endstop *lce
+                                    , uint8_t error_code)
 {
     uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce->flags);
     if (is_homing) {
         if (error_code == 0) {
-            shutdown("load_cell_endstop: Sensor reported an error while homing: SE_OVERFLOW");
+            shutdown("load_cell_endstop: "
+            "Sensor reported an error while homing: SE_OVERFLOW");
         }
         else if (error_code == 1) {
-            shutdown("load_cell_endstop: Sensor reported an error while homing: SE_SCHEDULE");
+            shutdown("load_cell_endstop: "
+            "Sensor reported an error while homing: SE_SCHEDULE");
         }
         else if (error_code == 2) {
-            shutdown("load_cell_endstop: Sensor reported an error while homing: SE_SPI_TIME");
+            shutdown("load_cell_endstop: "
+            "Sensor reported an error while homing: SE_SPI_TIME");
         }
         else if (error_code == 3) {
-            shutdown("load_cell_endstop: Sensor reported an error while homing: SE_CRC");
+            shutdown("load_cell_endstop: "
+            "Sensor reported an error while homing: SE_CRC");
         }
         else if (error_code == 4) {
-            return;  // duplicate errors are OK
+            return;  // sample_not_ready errors are OK
         }
         else {
-            shutdown("load_cell_endstop: Sensor reported an error while homing: UNKNOWN");
+            shutdown("load_cell_endstop: "
+            "Sensor reported an error while homing: UNKNOWN");
         }
     }
 }
@@ -190,11 +196,9 @@ command_load_cell_endstop_home(uint32_t *args)
 {
     struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(args[0]);
     lce->trigger_ticks = 0;
-    //lce->flags = set_flag(FLAG_IS_TRIGGERED, 0, lce->flags);
     // clear the homing trigger flag
     lce->flags = set_flag(FLAG_IS_HOMING_TRIGGER, 0, lce->flags);
     // 0 samples indicates homing is finished
-    // TODO: this feels dangerous, use reset for this instead!
     if (args[3] == 0) {
         // Disable end stop checking
         lce->ts = NULL;
