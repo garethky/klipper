@@ -15,10 +15,11 @@
 // Endstop Structure
 struct load_cell_endstop {
     struct timer time;
-    uint32_t trigger_ticks, last_sample_ticks, rest_ticks, timeout, nextwake;
+    uint32_t trigger_ticks, last_sample_ticks, rest_ticks;
     struct trsync *ts;
     int32_t last_sample, trigger_counts_min, trigger_counts_max, tare_counts;
-    uint8_t flags, sample_count, trigger_count, trigger_reason;
+    uint8_t flags, sample_count, trigger_count, trigger_reason, watchdog_max
+            , watchdog_count;
     
 };
 
@@ -69,6 +70,7 @@ load_cell_endstop_report_sample(struct load_cell_endstop *lce, int32_t sample
     // save new sample
     lce->last_sample = sample;
     lce->last_sample_ticks = ticks;
+    lce->watchdog_count = 0;
 
     uint8_t is_trigger = sample >= lce->trigger_counts_max 
                          || sample <= lce->trigger_counts_min;
@@ -111,16 +113,17 @@ watchdog_event(struct timer *t)
     struct load_cell_endstop *lce = container_of(t, struct load_cell_endstop
                                         , time);
     uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce->flags);
-    if (!is_homing) {
+    uint8_t is_homing_trigger = is_flag_set(FLAG_IS_HOMING_TRIGGER, lce->flags);
+    // the watchdog stops when not homing or when trsync becomes triggered
+    if (!is_homing || is_homing_trigger) {
         return SF_DONE;
     }
 
     irq_disable();
-    // arguably timer_read_time() would be more accurate
-    if (lce->time.waketime > (lce->last_sample_ticks + lce->timeout)) {
-        // timeout violated, no fresh samples from the sensor
+    if (lce->watchdog_count > lce->watchdog_max) {
         shutdown("LoadCell Endstop timed out waiting on ADC data");
     }
+    lce->watchdog_count += 1;
     irq_enable();
 
     // A sample was recently delivered, continue monitoring
@@ -148,6 +151,8 @@ command_config_load_cell_endstop(uint32_t *args)
     lce->trigger_ticks = 0;
     lce->trigger_counts_max = 0;
     lce->trigger_counts_min = 0;
+    lce->watchdog_max = 0;
+    lce->watchdog_count = 0;
 }
 DECL_COMMAND(command_config_load_cell_endstop, "config_load_cell_endstop"
                                                " oid=%c");
@@ -190,7 +195,8 @@ command_load_cell_endstop_home(uint32_t *args)
     lce->time.waketime = args[3];
     lce->sample_count = args[4];
     lce->rest_ticks = args[5];
-    lce->timeout = args[6];
+    lce->watchdog_max = args[6];
+    lce->watchdog_count = 0;
     lce->flags = set_flag(FLAG_IS_HOMING, 1, lce->flags);
     lce->time.func = watchdog_event;
     

@@ -34,6 +34,7 @@ class CollisionAnalyzer:
         return True
 
 DEFAULT_SAMPLE_COUNT = 2
+WATCHDOG_MAX = 3
 #LoadCellEndstop implements mcu_endstop and PrinterProbe
 class LoadCellEndstop:
     def __init__(self, config, load_cell):
@@ -130,7 +131,6 @@ class LoadCellEndstop:
         self._home_start_time = print_time
         clock = self._mcu.print_time_to_clock(print_time)
         rest_ticks = self._load_cell.sensor.get_clock_ticks_per_sample()
-        timeout_ticks = rest_ticks * 3
 
         # duplicode
         reactor = self._mcu.get_printer().get_reactor()
@@ -150,7 +150,7 @@ class LoadCellEndstop:
                                 self.tare_counts])
         self._home_cmd.send([self._oid, etrsync.get_oid()
             , etrsync.REASON_ENDSTOP_HIT, clock
-            , self.sample_count, rest_ticks, timeout_ticks]
+            , self.sample_count, rest_ticks, WATCHDOG_MAX]
             , reqclock=clock)
         self._sample_collector.start_collecting()
         return self._trigger_completion
