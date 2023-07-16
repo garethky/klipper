@@ -4,15 +4,23 @@
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
-#include <stdint.h> // uint8_t
 #include "basecmd.h" // oid_alloc
+#include "board/irq.h" // irq_disable
 #include "command.h" // DECL_COMMAND
-#include "trsync.h" // trsync_do_trigger
 #include "sched.h" // shutdown
+#include "trsync.h" // trsync_do_trigger
+#include "board/misc.h" // timer_read_time
 #include "load_cell_endstop.h" //load_cell_endstop_report_sample
 
-// TODO
-// Add watchdog timer that faults after 2 sample periods with no new sample
+// Endstop Structure
+struct load_cell_endstop {
+    struct timer time;
+    uint32_t trigger_ticks, last_sample_ticks, rest_ticks, timeout, nextwake;
+    struct trsync *ts;
+    int32_t last_sample, trigger_counts_min, trigger_counts_max, tare_counts;
+    uint8_t flags, sample_count, trigger_count, trigger_reason;
+    
+};
 
 const uint8_t DEFAULT_SAMPLE_COUNT = 2;
 
@@ -20,13 +28,6 @@ const uint8_t DEFAULT_SAMPLE_COUNT = 2;
 enum { FLAG_IS_HOMING = 1 << 0, FLAG_IS_TRIGGERED = 1 << 1
     , FLAG_IS_HOMING_TRIGGER = 1 << 2 };
 
-// Endstop Structure
-struct load_cell_endstop {
-    uint32_t trigger_ticks, last_sample_ticks;
-    int32_t last_sample, trigger_counts_min, trigger_counts_max, tare_counts;
-    uint8_t flags, trigger_count, trigger_reason, sample_count;
-    struct trsync *ts;
-};
 
 static uint8_t
 is_flag_set(uint8_t mask, uint8_t flags)
@@ -45,12 +46,14 @@ set_flag(uint8_t mask, uint8_t value, uint8_t flags)
 }
 
 void
-try_trigger(struct load_cell_endstop *lce, uint8_t is_homing
-                , uint8_t is_homing_triggered)
+try_trigger(struct load_cell_endstop *lce)
 {
     // set live trigger flag
     lce->flags = set_flag(FLAG_IS_TRIGGERED, 1, lce->flags);
 
+    uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce->flags);
+    uint8_t is_homing_triggered = is_flag_set(FLAG_IS_HOMING_TRIGGER,
+                                                lce->flags);
     if (is_homing && !is_homing_triggered) {
         // this flag latches until a reset, disabling further triggering
         lce->flags = set_flag(FLAG_IS_HOMING_TRIGGER, 1, lce->flags);
@@ -58,7 +61,7 @@ try_trigger(struct load_cell_endstop *lce, uint8_t is_homing
     }
 }
 
-// Used by Load Cell sensor to report new ADC sample data
+// Used by Multiplex ADC to report new raw ADC sample
 void
 load_cell_endstop_report_sample(struct load_cell_endstop *lce, int32_t sample
                         , uint32_t ticks)
@@ -84,7 +87,7 @@ load_cell_endstop_report_sample(struct load_cell_endstop *lce, int32_t sample
         lce->trigger_count -= 1;
         // when the trigger count hits zero, trigger the trsync
         if (lce->trigger_count == 0) {
-            try_trigger(lce, is_homing, is_homing_triggered);
+            try_trigger(lce);
         }
     }
     else if (!is_trigger && lce->trigger_count < lce->sample_count) {
@@ -101,55 +104,28 @@ load_cell_endstop_report_sample(struct load_cell_endstop *lce, int32_t sample
     }
 }
 
-void
-load_cell_endstop_report_error(struct load_cell_endstop *lce
-                                    , uint8_t error_code)
+// Timer callback that monitors for timeouts
+static uint_fast8_t
+watchdog_event(struct timer *t)
 {
+    struct load_cell_endstop *lce = container_of(t, struct load_cell_endstop
+                                        , time);
     uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce->flags);
-    if (is_homing) {
-        if (error_code == 0) {
-            shutdown("load_cell_endstop: "
-            "Sensor reported an error while homing: SE_OVERFLOW");
-        }
-        else if (error_code == 1) {
-            shutdown("load_cell_endstop: "
-            "Sensor reported an error while homing: SE_SCHEDULE");
-        }
-        else if (error_code == 2) {
-            shutdown("load_cell_endstop: "
-            "Sensor reported an error while homing: SE_SPI_TIME");
-        }
-        else if (error_code == 3) {
-            shutdown("load_cell_endstop: "
-            "Sensor reported an error while homing: SE_CRC");
-        }
-        else if (error_code == 4) {
-            return;  // sample_not_ready errors are OK
-        }
-        else {
-            shutdown("load_cell_endstop: "
-            "Sensor reported an error while homing: UNKNOWN");
-        }
+    if (!is_homing) {
+        return SF_DONE;
     }
-}
 
-void
-load_cell_endstop_source_stopped(struct load_cell_endstop *lce)
-{
-    uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce->flags);
-    if (is_homing) {
-        shutdown("load_cell_endstop: Sensor stopped sending data while homing");
+    irq_disable();
+    // arguably timer_read_time() would be more accurate
+    if (lce->time.waketime > (lce->last_sample_ticks + lce->timeout)) {
+        // timeout violated, no fresh samples from the sensor
+        shutdown("LoadCell Endstop timed out waiting on ADC data");
     }
-}
+    irq_enable();
 
-static void
-reset_endstop(struct load_cell_endstop *lce)
-{
-    lce->flags = 0;
-    lce->trigger_count = lce->sample_count = DEFAULT_SAMPLE_COUNT;
-    lce->trigger_ticks = 0;
-    lce->trigger_counts_max = 0;
-    lce->trigger_counts_min = 0;
+    // A sample was recently delivered, continue monitoring
+    lce->time.waketime += lce->rest_ticks;
+    return SF_RESCHEDULE;
 }
 
 static void
@@ -167,7 +143,11 @@ command_config_load_cell_endstop(uint32_t *args)
 {
     struct load_cell_endstop *lce = oid_alloc(args[0]
                             , command_config_load_cell_endstop, sizeof(*lce));
-    reset_endstop(lce);
+    lce->flags = 0;
+    lce->trigger_count = lce->sample_count = DEFAULT_SAMPLE_COUNT;
+    lce->trigger_ticks = 0;
+    lce->trigger_counts_max = 0;
+    lce->trigger_counts_min = 0;
 }
 DECL_COMMAND(command_config_load_cell_endstop, "config_load_cell_endstop"
                                                " oid=%c");
@@ -179,15 +159,14 @@ load_cell_endstop_oid_lookup(uint8_t oid)
     return oid_lookup(oid, command_config_load_cell_endstop);
 }
 
-// Reset endstop
+// Set the triggering range and tare value
 void
-command_reset_load_cell_endstop(uint32_t *args)
+command_set_range_load_cell_endstop(uint32_t *args)
 {
     struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(args[0]);
-    reset_endstop(lce);
     set_endstop_range(lce, args[1], args[2]);
 }
-DECL_COMMAND(command_reset_load_cell_endstop, "reset_load_cell_endstop"
+DECL_COMMAND(command_set_range_load_cell_endstop, "set_range_load_cell_endstop"
                 " oid=%c trigger_counts=%u tare_counts=%i");
 
 // Home an axis
@@ -195,6 +174,7 @@ void
 command_load_cell_endstop_home(uint32_t *args)
 {
     struct load_cell_endstop *lce = load_cell_endstop_oid_lookup(args[0]);
+    sched_del_timer(&lce->time);
     lce->trigger_ticks = 0;
     // clear the homing trigger flag
     lce->flags = set_flag(FLAG_IS_HOMING_TRIGGER, 0, lce->flags);
@@ -207,13 +187,18 @@ command_load_cell_endstop_home(uint32_t *args)
     }
     lce->ts = trsync_oid_lookup(args[1]);
     lce->trigger_reason = args[2];
-    lce->sample_count = args[3];
-    set_endstop_range(lce, args[4], args[5]);
+    lce->time.waketime = args[3];
+    lce->sample_count = args[4];
+    lce->rest_ticks = args[5];
+    lce->timeout = args[6];
     lce->flags = set_flag(FLAG_IS_HOMING, 1, lce->flags);
+    lce->time.func = watchdog_event;
+    
+    sched_add_timer(&lce->time);
 }
 DECL_COMMAND(command_load_cell_endstop_home,
              "load_cell_endstop_home oid=%c trsync_oid=%c trigger_reason=%c"
-             " sample_count=%c trigger_counts=%u tare_counts=%i");
+             " clock=%u sample_count=%c rest_ticks=%u timeout=%u");
 
 void
 command_load_cell_endstop_query_state(uint32_t *args)

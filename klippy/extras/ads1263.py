@@ -5,7 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import math
 
-from . import bus, load_cell
+from . import bus, multiplex_adc
 
 # ADS 1263 Commands
 CMD_NOP     = 0x00 # The No Op command
@@ -330,16 +330,14 @@ class ADS1263CommandHelper:
         self.chip.write_reg(reg, bytearray(val))
 
 # Printer class that controls ADS1263 chip
-class ADS1263(load_cell.LoadCellSensor):
+class ADS1263(multiplex_adc.MultiplexAdcSensor):
     def __init__(self, config):
         self.printer = printer = config.get_printer()
         self.reactor = printer.get_reactor()
         # Setup SPI communications on the MCU hosting the sensor
-        self.spi = spi = bus.MCU_SPI_from_config(config, 1, default_speed=25000000)
+        self.spi = bus.MCU_SPI_from_config(config, 1, default_speed=25000000)
         self.mcu = mcu = self.spi.get_mcu()
-        self.oid = oid = mcu.create_oid()
-        mcu.add_config_cmd("config_ads1263 oid=%d spi_oid=%d"
-            % (oid, spi.get_oid()))
+        self.oid = mcu.create_oid()
         self.is_capturing = False
         self.gain = config.getint('gain', minval=0, maxval=5, default=0)
         # 8 = 400 SPS
@@ -347,8 +345,12 @@ class ADS1263(load_cell.LoadCellSensor):
                                                      , maxval=15, default=8)
         #TODO: read the rest of the properties from the config
         ADS1263CommandHelper(config, self)
+        mcu.register_config_callback(self._build_config)
         printer.register_event_handler("klippy:firmware_restart", self._connect)
         printer.register_event_handler("klippy:connect", self._connect)
+    def _build_config(self):
+        self.mcu.add_config_cmd("config_ads1263 oid=%d spi_oid=%d"
+            % (self.oid, self.spi.get_oid()))
     def _connect(self):
         self.reset()
         self.configure(gain = self.gain, rate=self.samples_per_second)
@@ -357,7 +359,7 @@ class ADS1263(load_cell.LoadCellSensor):
         return self.oid
     def get_mcu(self):
         return self.mcu
-    def get_load_cell_sensor_type(self):
+    def get_mux_adc_sensor_type(self):
         return "ads1263"
     def get_samples_per_second(self):
         return SAMPLES_PER_S[self.samples_per_second]
@@ -441,7 +443,7 @@ class ADS1263(load_cell.LoadCellSensor):
             self.set_mode1(filter_val), self.set_mode2(rate, pga_enable, gain),
             self.set_ref_mux(vref), self.set_offset_cal(offset),
             self.set_range_cal(range)]
-        results = filter(None, results)
+        results = list(filter(None, results))
         if len(results):
             return "\n".join(results)
         return None
@@ -472,4 +474,4 @@ class ADS1263(load_cell.LoadCellSensor):
         return stored_val
 
 def load_config_prefix(config):
-    return ADS1263(config)
+    return multiplex_adc.MultiplexAdcSensorWrapper(config, ADS1263(config))

@@ -5,9 +5,9 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
 import logging
-from . import load_cell
+from . import multiplex_adc
 
-class HX711(load_cell.LoadCellSensor):
+class HX711(multiplex_adc.MultiplexAdcSensor):
     def __init__(self, config):
         self.printer = printer = config.get_printer()
         self.name = config.get_name()
@@ -24,8 +24,8 @@ class HX711(load_cell.LoadCellSensor):
         self.gain_channel = int(config.getchoice('gain', {'A-128': 1, 'B-32': 2
                                     , 'A-64': 3}, default='A-128'))
         ppins.register_chip(self.name, self)
-    #    mcu.register_config_callback(self._build_config)
-    #def _build_config(self):
+        mcu.register_config_callback(self._build_config)
+    def _build_config(self):
         logging.info("creating HX711 config_hx71x oid=%d dout_pin=%s" \
                                     " sclk_pin=%s gain_channel=%d"
             % (self.oid, self.dout_pin, self.sclk_pin
@@ -36,7 +36,7 @@ class HX711(load_cell.LoadCellSensor):
                , self.gain_channel))
     def get_oid(self):
         return self.oid
-    def get_load_cell_sensor_type(self):
+    def get_mux_adc_sensor_type(self):
         return 'hx71x'
     def get_mcu(self):
         return self.mcu
@@ -48,4 +48,4 @@ class HX711(load_cell.LoadCellSensor):
         return self.sps
 
 def load_config_prefix(config):
-    return HX711(config)
+    return multiplex_adc.MultiplexAdcSensorWrapper(config, HX711(config))

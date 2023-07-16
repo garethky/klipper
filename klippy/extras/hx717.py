@@ -4,9 +4,10 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-from . import load_cell
+import logging
+from . import multiplex_adc
 
-class HX717(load_cell.LoadCellSensor):
+class HX717(multiplex_adc.MultiplexAdcSensor):
     def __init__(self, config):
         self.printer = printer = config.get_printer()
         self.name = config.get_name()
@@ -26,13 +27,17 @@ class HX717(load_cell.LoadCellSensor):
         ppins.register_chip(self.name, self)
         mcu.register_config_callback(self._build_config)
     def _build_config(self):
+        logging.info("creating HX717 config_hx71x oid=%d dout_pin=%s" \
+                                    " sclk_pin=%s gain_channel=%d"
+            % (self.oid, self.dout_pin, self.sclk_pin
+               , self.gain_channel))
         self.mcu.add_config_cmd("config_hx71x oid=%c dout_pin=%s" \
                                     " sclk_pin=%s gain_channel=%d"
             % (self.oid, self.dout_pin, self.sclk_pin
                , self.gain_channel))
     def get_oid(self):
         return self.oid
-    def get_load_cell_sensor_type(self):
+    def get_mux_adc_sensor_type(self):
         return 'hx71x'
     def get_mcu(self):
         return self.mcu
@@ -44,4 +49,4 @@ class HX717(load_cell.LoadCellSensor):
         return self.sps
 
 def load_config_prefix(config):
-    return HX717(config)
+    return multiplex_adc.MultiplexAdcSensorWrapper(config, HX717(config))

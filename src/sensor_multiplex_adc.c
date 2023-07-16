@@ -24,7 +24,7 @@ enum { TCODE_ERROR = 0xff };
 
 // Sample Error Types
 enum {
-    SE_OVERFLOW, SE_SCHEDULE, SE_READ_TIME, SE_CRC, SE_DUPLICATE
+    SE_OVERFLOW, SE_SCHEDULE, SE_READ_TIME, SE_CRC, SE_NOT_READY
 };
 
 // Flag types
@@ -38,7 +38,6 @@ enum {
 };
 
 #define SAMPLE_WIDTH 5
-#define ERROR_WIDTH 2
 #define SAMPLE_NOT_READY_DELAY timer_from_us(200)
 
 struct mux_adc {
@@ -52,8 +51,8 @@ struct mux_adc {
     // TODO: support 1 endstop for each channel on the ADC
     struct load_cell_endstop *load_cell_endstop;
     uint8_t flags, sensor_type, sensor_oid, data_count, time_shift, overflow;
-    // dont try to send anything larger than 64 bytes over the USB bus
-    uint8_t data[SAMPLE_WIDTH * 3];
+    // dont try to send anything larger than 48 bytes over the USB bus
+    uint8_t data[SAMPLE_WIDTH * 9];
 };
 
 static struct task_wake wake_multiplex_adc;
@@ -99,16 +98,9 @@ append_measurement(struct mux_adc *mux_adc, uint_fast8_t tcode
 
 // Append an error to the measurement buffer
 static void
-append_error(struct mux_adc *mux_adc, uint8_t error_code)
+append_error(struct mux_adc *mux_adc, uint_fast32_t error_code)
 {
-    // endstop is optional, report if enabled
-    if (mux_adc->load_cell_endstop) {
-        load_cell_endstop_report_error(mux_adc->load_cell_endstop, error_code);
-    }
-
-    mux_adc->data[mux_adc->data_count] = TCODE_ERROR;
-    mux_adc->data[mux_adc->data_count + 1] = error_code;
-    mux_adc->data_count += ERROR_WIDTH;
+    append_measurement(mux_adc, TCODE_ERROR, error_code);
 }
 
 // Add a measurement to the buffer
@@ -122,8 +114,9 @@ add_adc_data(struct mux_adc *mux_adc, uint32_t sample_time)
 
     // if the time difference between when the sample was requested and 
     // when it was taken exceeds 0xFF its unusable
+
     if (tdiff >= TCODE_ERROR) {
-        append_load_cell_error(mux_adc, SE_SCHEDULE);
+        append_error(mux_adc, SE_SCHEDULE);
         return;
     }
 
@@ -134,7 +127,7 @@ add_adc_data(struct mux_adc *mux_adc, uint32_t sample_time)
                         , mux_adc->sample.measurement_time);
     }
 
-    append_load_cell_measurement(mux_adc, tdiff, mux_adc->sample.counts);
+    append_measurement(mux_adc, tdiff, mux_adc->sample.counts);
 }
 
 // use the contents of the sample container to report
@@ -146,9 +139,9 @@ add_sensor_result(struct mux_adc *mux_adc, uint32_t sample_time) {
     } else if (mux_adc->sample.crc_error) {
         append_error(mux_adc, SE_CRC);
     } else if (mux_adc->sample.sample_not_ready) {
-        append_error(mux_adc, SE_DUPLICATE);
+        append_error(mux_adc, SE_NOT_READY);
     } else {
-        add_load_cell_data(mux_adc, sample_time);
+        add_adc_data(mux_adc, sample_time);
     }
 }
 
@@ -190,14 +183,14 @@ command_config_multiplex_adc(uint32_t *args)
         shutdown("Invalid multiplex adc sensor type");
     }
     mux_adc->sensor_oid = args[2];
-    uint8_t mux_adc_oid = args[3];
+    uint8_t lc_endstop_oid = args[3];
     // optional endstop
-    if (mux_adc_oid != 0) {
-        mux_adc->load_cell_endstop = load_cell_endstop_oid_lookup(mux_adc_oid);
+    if (lc_endstop_oid != 0) {
+        mux_adc->load_cell_endstop = load_cell_endstop_oid_lookup(lc_endstop_oid);
     }
 }
-DECL_COMMAND(command_config_multiplex_adc, "config_config_multiplex_adc oid=%c"
-            " multiplex_adc_sensor_type=%c sensor_oid=%c"
+DECL_COMMAND(command_config_multiplex_adc, "config_multiplex_adc oid=%c"
+            " mux_adc_sensor_type=%c sensor_oid=%c"
             " load_cell_endstop_oid=%c");
 
 // start/stop capturing ADC data
@@ -211,9 +204,11 @@ command_query_multiplex_adc(uint32_t *args)
     mux_adc->flags = 0;
     if (!args[2]) {
         // End measurements
+        /**
         if (mux_adc->load_cell_endstop) {
             load_cell_endstop_source_stopped(mux_adc->load_cell_endstop);
         }
+        */
         if (mux_adc->data_count) {
             mux_adc_report(mux_adc, oid);
         }
