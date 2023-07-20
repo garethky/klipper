@@ -4,7 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import binascii
-import logging, threading, logging, struct, collections
+import logging, math, threading, logging, struct, collections
 from . import motion_report
 
 #
@@ -73,7 +73,6 @@ ERROR_READ_TIME = 2
 ERROR_CRC = 3
 ERROR_SAMPLE_NOT_READY = 4
 
-
 class MultiplexAdcCaptureHelper:
     def __init__(self, printer, oid, mcu):
         self.printer = printer
@@ -123,17 +122,18 @@ class MultiplexAdcCaptureHelper:
         self.reset()
     def is_capturing(self):
         return self.start_clock != 0
-    def _process_error(self, error):
+    def _process_error(self, error, record_clock):
         sample = None
         if error == ERROR_SAMPLE_NOT_READY:
-            sample = ("error_not_ready", 0, 1)
+            sample = ("error_not_ready", record_clock, 1)
         elif error == ERROR_CRC:
-            sample = ("error_crc", 0, 1)
+            sample = ("error_crc", record_clock, 1)
         elif error == ERROR_READ_TIME:
-            sample = ("error_read_time", 0, 1)
+            sample = ("error_read_time", record_clock, 1)
         else:
-            sample = ("error_unknown", 0, 1)
-        logging.error("MultiplexADC returned an ERROR: %s" % (sample[0]))
+            sample = ("error_unknown", record_clock, 1)
+        logging.error("MultiplexADC returned an ERROR: %s print_time: %s" \
+                      % (sample[0], record_clock))
         return sample
     def flush(self):
         # local variables to optimize inner loop below
@@ -171,14 +171,13 @@ class MultiplexAdcCaptureHelper:
                     sample = unpack_int32_from(d, offset=i)[0]
                     i += 4
                     if time_diff == TIME_CODE_ERROR:
-                        samples.append(self._process_error(sample))
+                        samples.append(self._process_error(sample, clock_to_print_time(record_clock)))
                     else:
                         # timestamp is record_clock + offset shifted by time_shift
                         sample_clock = record_clock + time_diff
                         samples.append(["sample",
                                         clock_to_print_time(sample_clock),
-                                        sample])
-                    
+                                        sample, time_diff])
             except Exception:
                 logging.exception("Load Cell Samples threw an exception: " \
                     "%s (%i) i: %i" % (binascii.hexlify(d), data_len, i))
@@ -191,18 +190,13 @@ class MultiplexAdcCaptureHelper:
 # Printer class that forms the basis of Multiplex ADC functionality
 class MultiplexAdcSensorWrapper():
     def __init__(self, config, sensor):
-        self.printer = printer = config.get_printer()
+        self.printer = config.get_printer()
         self.sensor = sensor
         self.name = config.get_name()
-        #name_parts = name.split()
-        #sensor_name = ' '.join(name.split()[1:])
         self.load_cell_endstop_oid = 0
         self.mcu = mcu = self.sensor.get_mcu()
         self.mux_adc_oid = mcu.create_oid()
         self.samples = None
-        self.update_timer = None
-        self.dump = []
-        #self.subscribers = []
         # API server endpoint
         self.api_dump = motion_report.APIDumpHelper(
             self.printer, self._api_update, self._api_startstop, 0.100)
@@ -234,7 +228,7 @@ class MultiplexAdcSensorWrapper():
         return {'samples': samples}
     def _add_webhooks_client(self, web_request):
         self.api_dump.add_client(web_request)
-        web_request.send({'header': ['type', 'time', 'value']})
+        web_request.send({'header': ['type', 'time', 'value', 'clock_error']})
     def attach_load_cell_endstop(self, endstop_oid):
         if self.load_cell_endstop_oid != 0:
             self.printer.invoke_shutdown("Endstop already configured on %s"
@@ -245,7 +239,7 @@ class MultiplexAdcSensorWrapper():
     def get_samples_per_second(self):
         return self.sensor.get_samples_per_second()
     def get_clock_ticks_per_sample(self):
-        sample_period = 1. / self.get_samples_per_second()
+        sample_period = 1. / float(self.get_samples_per_second())
         return self.mcu.seconds_to_clock(sample_period)
     def start_capture(self):
         if self.is_capturing():

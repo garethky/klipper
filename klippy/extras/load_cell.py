@@ -3,8 +3,7 @@
 # Copyright (C) 2022 Gareth Farrington <gareth@waves.ky>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging, logging
-
+import logging, collections
 from . import probe, load_cell_endstop, multiplex_adc
 
 # An API Dump Helper for broadcasting events to clients
@@ -59,15 +58,16 @@ class LoadCellCommandHelper:
                                    desc=self.cmd_READ_LOAD_CELL_help)
     cmd_TARE_LOAD_CELL_help = "Set the Zero point of the load cell"
     def cmd_TARE_LOAD_CELL(self, gcmd):
+        import numpy as np
         sps = self.load_cell.sensor.get_samples_per_second()
         samples = self.load_cell.get_collector().collect_samples(sps)
-        counts = samples[2]
-        import numpy as np
+        counts = np.asarray(samples)[:, 2].astype(float)
         tare_counts = np.average(counts)
         self.load_cell.tare(tare_counts)
         gcmd.respond_info("Load Cell tare counts value: %i" % (tare_counts))
     cmd_CALIBRATE_LOAD_CELL_help = "Set the conversion from raw counts to grams"
     def cmd_CALIBRATE_LOAD_CELL(self, gcmd):
+        import numpy as np
         #if the tare value is not set, return an error
         if not self.load_cell.is_tared():
             gcmd.respond_error("TARE_LOAD_CELL before calibrating!")
@@ -75,36 +75,36 @@ class LoadCellCommandHelper:
         grams = gcmd.get_float("GRAMS", default=1., minval=1., maxval=25000.)
         sps = self.load_cell.sensor.get_samples_per_second()
         samples = self.load_cell.get_collector().collect_samples(sps * 5)
-        counts = samples[2]
-        import numpy as np
-        avg = np.average(counts)
-        counts_per_gram = abs(int(avg / grams))
+        counts = np.asarray(samples)[:, 2].astype(float)
+        cal_counts = np.average(counts)
+        tare = self.load_cell.get_tare_counts()
+        counts_per_gram = float(abs(int(tare - cal_counts))) / grams
         self.load_cell.set_counts_per_gram(counts_per_gram)
         capacity = int(int(0x7FFFFFFF) / counts_per_gram)
         gcmd.respond_info("Load Cell Calibrated, Counts/gram: %i, \
                           Capacity: +/- %ig" % (counts_per_gram, capacity))
     cmd_READ_LOAD_CELL_help = "Take a reading from the load cell"
     def cmd_READ_LOAD_CELL(self, gcmd):
+        import numpy as np
         sps = self.load_cell.sensor.get_samples_per_second()
         samples = self.load_cell.get_collector().collect_samples(sps * 5)
-        import numpy as np
-        counts = samples[2]
+        samples = np.asarray(samples)
+        counts = samples[:, 2].astype(float)
         avg = np.average(counts)
         if not self.load_cell.is_calibrated():
             gcmd.respond_info("Load Cell reading: raw average: %i, \
                                samples: %i" % (avg, len(counts)))
             return
-        force = samples[1]
+        force = samples[:, 1].astype(float)
         grams = np.average(force)
         min_force = min(force)
         max_force = max(force)
         noise = round(abs(max_force - min_force) / 2., 6)
         sd = round(abs(np.std(force)), 6)
-        five_sigma = round(np.std(force) * 5., 6)
         gcmd.respond_info("Load Cell reading: raw average: %i, weight: %fg, \
              min: %fg, max: %fg, noise: +/-%fg, standard deviation: %fg, \
-             6 Sigma: %fg, samples: %i" % (avg, grams, min_force, max_force,
-            noise, sd, five_sigma, len(counts)))
+             samples: %i" % (avg, grams, min_force, max_force,
+            noise, sd, len(counts)))
 
 # Utility to easily collect some samples for later analysis
 # Optionally blocks execution while collecting with reactor.pause()
@@ -117,43 +117,38 @@ class LoadCellSampleCollector():
         self._reactor = reactor
         self._mcu = load_cell.sensor.get_mcu()
         self.target_samples = 1
-        self._counts = []
-        self._force = []
-        self._time = []
+        self._samples = collections.deque()
         self._client = None
     def _on_samples(self, data):
         # filter non "samples" type messages
         # TODO: what about errors?
         if not data.get("params", {}).get("samples"):
             return
-        for sample in data["params"]["samples"]:
-            # TODO: take out this reshaping, its not helping clients
-            self._time.append(sample[0])
-            self._force.append(sample[1])
-            self._counts.append(sample[2])
-    def start_collecting(self, samples=None):
+        self._samples.extend(data["params"]["samples"])
+    def start_collecting(self):
         self.stop_collecting()
-        self._counts = []
-        self._force = []
-        self._time = []
+        self._samples.clear()
         self._client = self._load_cell.subscribe(self._on_samples)
     def stop_collecting(self):
         if self.is_collecting():
             self._client.close()
             self._client = None
     def get_samples(self):
-        return (self._time, self._force, self._counts)
+        out = []
+        out.extend(self._samples)
+        return out
     def is_collecting(self):
         return self._client is not None
     # return true when the last sample has a time after the target time
     def _time_test(self, print_time):
         def test():
-            return (not len(self._time) == 0) and self._time[-1] >= print_time
+            return (not len(self._samples) == 0) \
+                        and self._samples[-1][0] >= print_time
         return test
     # return true when a set number of samples have been collected
     def _count_test(self, target):
         def test():
-            return len(self._force) >= target
+            return len(self._samples) >= target
         return test
     def _collect_until_test(self, test, timeout):
         if not self.is_collecting():
@@ -165,6 +160,7 @@ class LoadCellSampleCollector():
                 logging.warn("LoadCellSampleCollector.collect_? timed out")
                 break
             self._reactor.pause(now + RETRY_DELAY)
+        self.stop_collecting()
         return self.get_samples()
     # block execution until n samples are collected
     def collect_samples(self, samples=None):
@@ -184,6 +180,10 @@ class LoadCellSampleCollector():
 # Printer class that controls the load cell
 class LoadCell:
     def __init__(self, config):
+        try:
+            import numpy as np
+        except:
+            raise config.error("LoadCell requires the numpy module")
         self.printer = printer = config.get_printer()
         self.name = name = config.get_name()
         sensor_name = config.get('sensor')
@@ -203,6 +203,7 @@ class LoadCell:
         self.tare_counts = None
         self.counts_per_gram = config.getint('counts_per_gram', minval=1
                                             , default=None)
+        
         LoadCellCommandHelper(config, self)
         self.trigger_force_grams = config.getfloat('trigger_force_grams'
                                                    , minval=10., default=50.)
@@ -216,15 +217,16 @@ class LoadCell:
         self.sensor_client = self.sensor.subscribe(self._sensor_data_event)
     # convert raw counts to grams and broadcast to clients
     def _sensor_data_event(self, data):
-        if data.get("params", {}).get("samples"):
-            samples = []
-            for row in data["params"]["samples"]:
-                if row[0] == 'sample':
-                    # [time, grams, counts]
-                    samples.append([row[1],
-                                    self.counts_to_grams(row[2]),
-                                    row[2]])
-            self.api_dump.send({'samples': samples})
+        if not data.get("params", {}).get("samples"):
+            return
+        samples = []
+        for row in data["params"]["samples"]:
+            if row[0] == 'sample':
+                # [time, grams, counts]
+                samples.append([row[1],
+                                self.counts_to_grams(row[2]),
+                                row[2]])
+        self.api_dump.send({'samples': samples})
     def send_endstop_event(self, endstop_data):
         self.api_dump.send({'endstop': endstop_data})
     # get internal events of force data
@@ -235,6 +237,8 @@ class LoadCell:
     def tare(self, tare_counts):
         self.tare_counts = tare_counts
         self.set_endstop_range()
+    def get_tare_counts(self):
+        return self.tare_counts
     def set_counts_per_gram(self, counts_per_gram):
         if counts_per_gram is None:
             self.counts_per_gram = None

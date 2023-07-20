@@ -1,34 +1,143 @@
-import logging
-import chelper
+import logging, time, chelper
 from mcu import TRSYNC_SINGLE_MCU_TIMEOUT, TRSYNC_TIMEOUT, MCU_trsync
-import sys
+from . import motion_report
+
+# TODO:is this access to motion_report/DumpTrapQ internals OK?
+#get recent history of the toolhead motion
+def get_trapq_history(printer, start_time):
+    return printer.lookup_object('motion_report') \
+            .trapqs['toolhead'] \
+            .extract_trapq(start_time, motion_report.NEVER_TIME)
 
 class CollisionAnalyzer:
     def __init__(self, samples, home_start_time, home_end_time, trigger_time):
-        self._samples = samples
+        try:
+            import numpy as np
+        except:
+            raise config.error("LoadCell requires the numpy module")
+        self._samples = np.asarray(samples).astype(float)
         self._home_start_time = home_start_time
         self._home_end_time = home_end_time
         self._trigger_time = trigger_time
+        self._time = self._samples[:, 0]
+        self._force = self._samples[:, 1]
+        self._pre_collision_line = None
+        self._post_collision_line = None
+        self._elbow_index = self._collision_force = self._collision_time \
+            = self._start_index = self._end_index = self._end_index = 0
         self._analyze()
     def _analyze(self):
-        pass
+        start_time = time.time()
+        start_index, end_index = self.trim_to_probing()
+        self._start_index = start_index
+        self._end_index = end_index
+        elbow_index = self.select_elbow_point(start_index, end_index)
+        self._elbow_index = elbow_index
+        end_time = time.time()
+        elapsed = end_time - start_time
+        logging.info("start_index: %s, elbow index, %s, end_index: %s. Time taken: %ss" % (start_index, elbow_index, end_index, elapsed))
+        self._collision_force, self._collision_time = self.calculate_collision(start_index, \
+                                                    elbow_index, end_index)
+        end_time = time.time()
+        elapsed = end_time - start_time
+        logging.info("collision force: %s, collision time, %s.  Time taken: %ss" % (self._collision_force, self._collision_time, elapsed))
+    def trim_to_probing(self):
+        #TODO: use movement data to trim start_time
+        start_index = 0
+        #get_trapq_history()...
+
+        end_index = len(self._samples) - 1
+        while self._samples[end_index][0] > self._trigger_time: 
+            end_index -= 1
+        return 0, end_index + 2  # TODO: 2 is a magic number for my sample rate
+    def select_elbow_point(self, start_index, end_index):
+        best_fit = float("inf")
+        # this assumes fit will improve as the elbow point goes left
+        elbow_index = end_index - 2
+        for i in reversed(range(start_index + 2 + 20, elbow_index)):
+            #TODO: 20 is a magic number and should be based on time!
+            # also it could overflow the front of the array!
+            new_fit = self.check_elbow_fit(i - 20, i, end_index)
+            if new_fit <= best_fit:
+                best_fit = new_fit
+                elbow_index = i
+            else:
+                break
+        return elbow_index # best fit found
+    def calculate_collision(self, start_index, elbow_index, end_index):
+        #slope, c = self.least_squares(self._time, self._force,
+        #                                        elbow_index, end_index)[0]
+        pre_elbow_time = self._samples[elbow_index - 1][0]
+        pre_elbow_force = self._samples[elbow_index - 1][1]
+        elbow_time = self._samples[elbow_index][0]
+        elbow_force = self._samples[elbow_index][1]
+        end_force = self._samples[end_index][1]
+
+        # calculate average force per unit time (assumes axis moves ~constant velocity)
+        avg_force = (end_force - pre_elbow_force) / (end_index - elbow_index - 1)
+        # what percentage of that average force change is the elbow point away from the point just before it?
+        # this has to be clamped to 1. because large force changes are not physically possible
+        elbow_force_percent = min(1., abs((elbow_force - pre_elbow_force) / avg_force))
+        # time between the two points
+        time_d = elbow_time - pre_elbow_time
+        time_delta = time_d * elbow_force_percent
+        return pre_elbow_force, pre_elbow_time + (time_d - time_delta)
+    def check_elbow_fit(self, start_index, elbow_index, end_index):
+        import numpy as np
+        m1, resid_pre = self.least_squares(self._time, self._force,
+                                                start_index, elbow_index)
+        m2, resid_post = self.least_squares(self._time, self._force,
+                                                elbow_index + 1, end_index)
+        logging.info("Pre collision fit: %s, post collision fit: %s" 
+                     % (np.sum(resid_pre), np.sum(resid_post)))
+        
+        t0 = self._samples[start_index][0]
+        t1 = self._samples[elbow_index][0]
+        self._pre_collision_line = [{"time": t0, "force": m1[0] * t0 + m1[1]},
+                                    {"time": t1, "force": m1[0] * t1 + m1[1]}]
+        # solve the second line for elbow - 1 to end
+        t2 = self._samples[elbow_index + 1][0]
+        t3 = self._samples[end_index][0]
+        self._post_collision_line = [{"time": t2, "force": m2[0] * t2 + m2[1]},
+                                     {"time": t3, "force": m2[0] * t3 + m2[1]}]
+
+        return np.sum(resid_pre) + np.sum(resid_post)
+    # compute least squares of a sub-array
+    def least_squares(self, x, y, start_index, end_index):
+        import numpy as np
+        sub_x = x[start_index:end_index]
+        sub_y = y[start_index:end_index]
+        x_stacked = np.vstack([sub_x, np.ones(len(sub_x))]).T
+        mxb, residuals, _, _ = np.linalg.lstsq(x_stacked, sub_y, rcond=None)
+        return mxb, residuals
     def get_endstop_event(self):
         series = []
-        for i in range(len(self._samples[0])):
+        collision_area = self._samples[self._elbow_index - 20 : self._end_index + 5]
+        for i in range(len(collision_area)):
             series.append ({
-                "time": self._samples[0][i],
-                "force": self._samples[1][i],
-                "counts": self._samples[2][i]
+                "time": collision_area[i][0],
+                "force": collision_area[i][1],
+                "counts": collision_area[i][2]
             })
         return {
             "series": series,
+            "pre_collision_line": self._pre_collision_line,
+            "post_collision_line": self._post_collision_line,
+            "collision_point": [{"time": self._collision_time,
+                                 "force": self._collision_force}],
+            "elbow_point": [{"time": self._samples[self._elbow_index][0],
+                             "force": self._samples[self._elbow_index][1]}],
+            "trigger_point": [{"time": self._trigger_time,
+                             "force": self._samples[self._end_index - 2][1]}],
+            "end_point": [{"time": self._samples[self._end_index][0],
+                           "force": self._samples[self._end_index][1]}],
             "home_start_time": self._home_start_time,
             "trigger_time": self._trigger_time,
             "homing_end_time": self._home_end_time,
         }
     # get the print time when the collision started
     def get_collision_time(self):
-        return self._trigger_time
+        return self._collision_time
     # get the collision quality
     def is_good_tap(self):
         return True
