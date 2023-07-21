@@ -82,13 +82,14 @@ hx71x_delay(hx71x_time_t start, hx71x_time_t ticks)
 void
 hx71x_query(struct hx71x_sensor *hx71x, struct mux_adc_sample *sample)
 {
+    // if the pin is high the sample is not ready
     if (gpio_in_read(hx71x->dout)) {
         sample->sample_not_ready = 1;
         return;
     }
 
-    int32_t counts = 0x00;
     // data is ready
+    int32_t counts = 0x00;
     sample->measurement_time = timer_read_time();
     for (uint8_t sample_idx = 0; sample_idx < 24; sample_idx++) {
         irq_disable();
@@ -98,7 +99,7 @@ hx71x_query(struct hx71x_sensor *hx71x, struct mux_adc_sample *sample)
         irq_enable();
         hx71x_delay(hx71x_get_time(), MIN_PULSE_TIME);
         // read 2's compliment int bits
-        sample->counts = (counts << 1) | gpio_in_read(hx71x->dout);
+        counts = (counts << 1) | gpio_in_read(hx71x->dout);
     }
 
     // bit bang 1 to 4 more bits to configure gain & channel for the next sample
@@ -116,9 +117,8 @@ hx71x_query(struct hx71x_sensor *hx71x, struct mux_adc_sample *sample)
         return;
     }
 
-    if (sample->counts >= 0x800000) { 
-        sample->counts |= 0xFF000000;
-    }
+    //convert 24 bit signed to 32 bit signed
+    sample->counts = (counts >= 0x800000) ? (counts | 0xFF000000) : counts;
 }
 
 // Create an hx71x sensor
@@ -127,7 +127,7 @@ command_config_hx71x(uint32_t *args)
 {
     struct hx71x_sensor *hx71x = oid_alloc(args[0]
                             , command_config_hx71x, sizeof(*hx71x));
-    hx71x->dout = gpio_in_setup(args[1], 0);
+    hx71x->dout = gpio_in_setup(args[1], -1);
     hx71x->sclk = gpio_out_setup(args[2], 0);
     uint8_t gain_channel = args[3];
     if (gain_channel < 1 || gain_channel > 4) {
