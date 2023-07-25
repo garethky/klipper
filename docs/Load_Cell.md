@@ -1,6 +1,6 @@
 # Load Cell
 
-This document describes Klipper's support for load cells and load cell based probing. 
+This document describes Klipper's support for load cells and load cell based probing.
 
 ## TARE_LOAD_CELL load_cell="name"
 This command works just like the tare button on scale. It sets the current raw reading of the load cell to be the zero point reference value. The response is the percentage of the sensors range that was read and the raw value in counts.
@@ -90,6 +90,7 @@ $ LOAD_CELL_DIAGNOSTIC LOAD_CELL="tool0"
 // Errors: 0
 ```
 
+Each line explained:
 ```
 // Samples Collected: 108
 ```
@@ -110,19 +111,23 @@ Sensors report a range from +100% to -100% based on the number of bits that the 
 // Sample range / sensor capacity: 2.64%
 This gives the size of the detected values as a percentage of the total 200% range of the sensor. If no force is applied this is a direct measurement of the noise and should be < 5%, lower is better. If you tap or push on the sensor ths range should increase. If you do not see an increase there may be a wiring issue.
 
-If you tap or press on the load cell while running the LOAD_CELL_DIAGNOSTICS command you should see a
+```
+// Errors: 0
+```
+The number of errors that the sensor returned during the sample period. If the
+ load cell receives any errors from the sensor these will be printed as a map:
 
-
-If the load cell receives any errors from the sensor these will be printed as a map:
-
+```
 // Errors: 40
-// Error breakdown: {'ERROR_SAMPLE_NOT_READY': 10, 'ERROR_CRC': 10, 'ERROR_READ_TIME': 10, 'ERROR_UNKNOWN': 10}
+// Error breakdown: {'ERROR_SAMPLE_NOT_READY': 10, 'ERROR_CRC': 10, 
+'ERROR_READ_TIME': 10, 'ERROR_UNKNOWN': 10}
+```
 
 Here is what each of these errors mean:
 1. `ERROR_SAMPLE_NOT_READY` - The sensor was not ready to produce a new sample value when it was read. This is mostly a warning, but large numbers of these errors indicate that the Sample Per Second of the sensor is misconfigured.
 1. `ERROR_CRC` - The cyclic redundancy check on the sensor reading failed, meaning the reading is corrupt. Check sensor wiring for loose connections or sources of interference.
-1. `ERROR_READ_TIME` -
-1. `ERROR_UNKNOWN` - The error is unregistered. If this ever happens its due to a bug
+1. `ERROR_READ_TIME` - The read process took longer than is allowed on th eMCU. This can be due to high MCU load or a gredy MCU task that interrupts the sensor read for a long time. This indicates that the reading has been lost.
+1. `ERROR_UNKNOWN` - The error code is unregistered in the klippy client. If this happens its due to a bug. (protects against future code changes that introduce new errors)
 
 
 
