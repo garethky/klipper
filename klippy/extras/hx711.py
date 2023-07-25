@@ -19,7 +19,7 @@ class HX711(multiplex_adc.MultiplexAdcSensor):
         self.dout_pin = dout_pin_params['pin']
         self.sclk_pin = sclk_pin_params['pin']
         # HX711 sps choices
-        self.sps = config.getchoice('sample_rate', {80: 80, 10: 10}, default=80)
+        self.sps = config.getchoice('sample_rate', {80: 80, 10: 10}, default=10)
         # HX711 gain/channel choices
         self.gain_channel = int(config.getchoice('gain', {'A-128': 1, 'B-32': 2
                                     , 'A-64': 3}, default='A-128'))
@@ -46,6 +46,8 @@ class HX711(multiplex_adc.MultiplexAdcSensor):
         pass # capture cant be stopped/started on these chips
     def get_samples_per_second(self):
         return self.sps
+    def get_bits(self):
+        return 24
 
 def load_config_prefix(config):
     return multiplex_adc.MultiplexAdcSensorWrapper(config, HX711(config))

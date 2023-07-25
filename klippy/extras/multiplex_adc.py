@@ -32,6 +32,9 @@ class MultiplexAdcSensor:
     # get the number of samples per second that the sensor is configured for
     def get_samples_per_second(self):
         pass
+    # return the number of bits this sensor supports
+    def get_bits(self):
+        return 32
     # return a status object which will be extended
     def get_status(self, eventtime):
         return {}
@@ -125,13 +128,14 @@ class MultiplexAdcCaptureHelper:
     def _process_error(self, error, record_clock):
         sample = None
         if error == ERROR_SAMPLE_NOT_READY:
-            sample = ("error_not_ready", record_clock, 1)
+            sample = ("error", record_clock, "ERROR_SAMPLE_NOT_READY")
         elif error == ERROR_CRC:
-            sample = ("error_crc", record_clock, 1)
+            sample = ("error", record_clock, "ERROR_CRC")
         elif error == ERROR_READ_TIME:
-            sample = ("error_read_time", record_clock, 1)
+            sample = ("error", record_clock, "ERROR_READ_TIME")
         else:
-            sample = ("error_unknown", record_clock, 1)
+            sample = ("error", record_clock, "ERROR_UNKNOWN")
+        #TODO: maybe dont log 
         logging.error("MultiplexADC returned an ERROR: %s print_time: %s" \
                       % (sample[0], record_clock))
         return sample

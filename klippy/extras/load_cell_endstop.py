@@ -2,62 +2,72 @@ import logging, time, chelper
 from mcu import TRSYNC_SINGLE_MCU_TIMEOUT, TRSYNC_TIMEOUT, MCU_trsync
 from . import motion_report
 
-# TODO:is this access to motion_report/DumpTrapQ internals OK?
-#get recent history of the toolhead motion
-def get_trapq_history(printer, start_time):
-    return printer.lookup_object('motion_report') \
-            .trapqs['toolhead'] \
-            .extract_trapq(start_time, motion_report.NEVER_TIME)
-
 class CollisionAnalyzer:
-    def __init__(self, samples, home_start_time, home_end_time, trigger_time):
+    def __init__(self, samples, probe_start_time, probe_end_time,
+                 trigger_time):
         try:
             import numpy as np
         except:
-            raise config.error("LoadCell requires the numpy module")
+            raise config.error("LoadCell Probe requires the numpy module")
         self._samples = np.asarray(samples).astype(float)
-        self._home_start_time = home_start_time
-        self._home_end_time = home_end_time
+        self._probe_start_time = probe_start_time
+        self._probe_end_time = probe_end_time
         self._trigger_time = trigger_time
         self._time = self._samples[:, 0]
         self._force = self._samples[:, 1]
         self._pre_collision_line = None
         self._post_collision_line = None
         self._elbow_index = self._collision_force = self._collision_time \
-            = self._start_index = self._end_index = self._end_index = 0
+            = self._start_index = 0
+        self._end_index = len(samples) -1
         self._analyze()
     def _analyze(self):
         start_time = time.time()
-        start_index, end_index = self.trim_to_probing()
-        self._start_index = start_index
-        self._end_index = end_index
-        elbow_index = self.select_elbow_point(start_index, end_index)
-        self._elbow_index = elbow_index
+        # trim to interesting samples
+        self.trim_to_probing()
+        # select elbow
+        self._elbow_index = self.select_elbow_point(self._start_index, self._end_index)
         end_time = time.time()
         elapsed = end_time - start_time
-        logging.info("start_index: %s, elbow index, %s, end_index: %s. Time taken: %ss" % (start_index, elbow_index, end_index, elapsed))
-        self._collision_force, self._collision_time = self.calculate_collision(start_index, \
-                                                    elbow_index, end_index)
+        logging.info("start_index: %s, elbow index, %s, end_index: %s. Time taken: %ss" % (self._start_index, self._elbow_index, self._end_index, elapsed))
+        self._collision_force, self._collision_time = \
+            self.calculate_collision(self._start_index, self._elbow_index,
+                                     self._end_index)
         end_time = time.time()
         elapsed = end_time - start_time
         logging.info("collision force: %s, collision time, %s.  Time taken: %ss" % (self._collision_force, self._collision_time, elapsed))
     def trim_to_probing(self):
-        #TODO: use movement data to trim start_time
-        start_index = 0
-        #get_trapq_history()...
-
-        end_index = len(self._samples) - 1
-        while self._samples[end_index][0] > self._trigger_time: 
-            end_index -= 1
-        return 0, end_index + 2  # TODO: 2 is a magic number for my sample rate
+        # find the trigger index:
+        trigger_index = 0
+        for i in reversed(range(len(self._samples))):
+            trigger_index = i
+            if self._samples[i][0] <= self._trigger_time:
+                break
+        
+        # take up to 200ms of data from before the probe triggered:
+        half_second = self._trigger_time - 0.2
+        for i in reversed(range(0, trigger_index)):
+            if self._samples[i][0] <= half_second:
+                self._start_index = i
+                break
+        # look forward from the trigger_index for increasing force
+        self._end_index = trigger_index
+        trigger_force = self._samples[trigger_index][1]
+        for i in range(trigger_index + 1, len(self._samples)):
+            f1 = self._samples[i][1]
+            f2 = self._samples[i - 1][1]
+            if trigger_force >= 0 and f1 > f2:
+                self._end_index += 1
+            elif trigger_force < 0 and f1 < f2:
+                self._end_index += 1
+            else:
+                break
     def select_elbow_point(self, start_index, end_index):
         best_fit = float("inf")
         # this assumes fit will improve as the elbow point goes left
         elbow_index = end_index - 2
-        for i in reversed(range(start_index + 2 + 20, elbow_index)):
-            #TODO: 20 is a magic number and should be based on time!
-            # also it could overflow the front of the array!
-            new_fit = self.check_elbow_fit(i - 20, i, end_index)
+        for i in reversed(range(start_index + 2, elbow_index)):
+            new_fit = self.check_elbow_fit(start_index, i, end_index)
             if new_fit <= best_fit:
                 best_fit = new_fit
                 elbow_index = i
@@ -112,7 +122,7 @@ class CollisionAnalyzer:
         return mxb, residuals
     def get_endstop_event(self):
         series = []
-        collision_area = self._samples[self._elbow_index - 20 : self._end_index + 5]
+        collision_area = self._samples[self._start_index : self._end_index]
         for i in range(len(collision_area)):
             series.append ({
                 "time": collision_area[i][0],
@@ -131,9 +141,9 @@ class CollisionAnalyzer:
                              "force": self._samples[self._end_index - 2][1]}],
             "end_point": [{"time": self._samples[self._end_index][0],
                            "force": self._samples[self._end_index][1]}],
-            "home_start_time": self._home_start_time,
+            "home_start_time": self._probe_start_time,
             "trigger_time": self._trigger_time,
-            "homing_end_time": self._home_end_time,
+            "homing_end_time": self._probe_end_time,
         }
     # get the print time when the collision started
     def get_collision_time(self):
@@ -292,7 +302,8 @@ class LoadCellEndstop:
         trigger_time = self._mcu.clock_to_print_time(trigger_ticks)
         # keep recording until at least when the homing stopped
         samples = self._sample_collector.collect_until(home_end_time)
-        analyzer = CollisionAnalyzer(samples, self._home_start_time, home_end_time, trigger_time)
+        analyzer = CollisionAnalyzer(samples,
+                    self._home_start_time, home_end_time, trigger_time)
         self._load_cell.send_endstop_event(analyzer.get_endstop_event())
         return analyzer.get_collision_time()
     def query_endstop(self, print_time):

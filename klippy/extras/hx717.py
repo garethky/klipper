@@ -47,6 +47,8 @@ class HX717(multiplex_adc.MultiplexAdcSensor):
         pass # capture cant be stopped/started on these chips
     def get_samples_per_second(self):
         return self.sps
+    def get_bits(self):
+        return 24
 
 def load_config_prefix(config):
     return multiplex_adc.MultiplexAdcSensorWrapper(config, HX717(config))
