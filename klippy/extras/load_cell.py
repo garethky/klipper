@@ -84,16 +84,15 @@ class LoadCellCommandHelper:
         LoadCellGuidedCalibrationHelper(self.printer, self.load_cell)
     cmd_READ_LOAD_CELL_help = "Take a reading from the load cell"
     def cmd_READ_LOAD_CELL(self, gcmd):
-        if not self.load_cell.is_tared():
-            raise self.printer.command_error("TARE_LOAD_CELL before reading")
-        if not self.load_cell.is_calibrated():
-            raise self.printer.command_error(
-                "CALIBRATE_LOAD_CELL before reading")
-        import numpy as np
         counts = self.load_cell.avg_counts()
         percent = self.load_cell.counts_to_percent(counts)
         force = self.load_cell.counts_to_grams(counts)
-        gcmd.respond_info("%.1fg (%.2f%%)" % (force, percent))
+        if percent >= 100 or percent<= -100:
+            gcmd.respond_info("Err (%.2f%%)" % (percent))
+        if force is None:
+            gcmd.respond_info("---.-g (%.2f%%)" % (percent))
+        else:
+            gcmd.respond_info("%.1fg (%.2f%%)" % (force, percent))
     cmd_LOAD_CELL_DIAGNOSTIC_help = "Check the health of the load cell"
     def cmd_LOAD_CELL_DIAGNOSTIC(self, gcmd):
         import numpy as np
@@ -139,7 +138,8 @@ class LoadCellGuidedCalibrationHelper:
             "Starting load cell calibration. \n"
             "1.) Remove all load and run TARE. \n"
             "2.) Apply a known load an run CALIBRATE GRAMS=nnn. \n"
-            "Finish with ACCEPT command or ABORT at any time.")
+            "Complete calibration with the ACCEPT command.\n"
+            "Use the ABORT command to quit.")
     def register_commands(self):
         register_command = self.gcode.register_command
         register_command("ABORT", self.cmd_ABORT, desc=self.cmd_ABORT_help)
@@ -178,7 +178,7 @@ class LoadCellGuidedCalibrationHelper:
         self.load_cell.set_counts_per_gram(self._counts_per_gram)
         self.gcode.respond_info("Load cell calibrated, counts per gram: %.6f\n"
             "The SAVE_CONFIG command will update the printer config file "
-            "with the above and restart the  ." % (self._counts_per_gram))
+            "with the above and restart the printer." % (self._counts_per_gram))
     cmd_ABORT_help = "Abort load cell calibration tool"
     def cmd_ABORT(self, gcmd):
         self.finalize(False)
@@ -206,8 +206,8 @@ class LoadCellGuidedCalibrationHelper:
         cal_percent = self.load_cell.counts_to_percent(cal_counts)
         c_per_g = self._counts_per_gram(grams, cal_counts)
         cap_kg = self.capacity_kg(self.load_cell, c_per_g)
-        gcmd.respond_info("Calibration value: %.2f%% (%i), Counts/gram: %.5f , \
-            Total Capacity: +/- %0.2fKg"
+        gcmd.respond_info("Calibration value: %.2f%% (%i), Counts/gram: %.5f, \
+            Total capacity: +/- %0.2fKg"
                 % (cal_percent, cal_counts, c_per_g, cap_kg))
         min, max = self.load_cell.saturation_range()
         if cal_counts >= max or cal_counts <= min:
@@ -267,9 +267,9 @@ class LoadCellSampleCollector():
             self._client.close()
             self._client = None
     def get_samples(self):
-        return self._samples
+        return [*self._samples]
     def get_errors(self):
-        return self._errors
+        return [*self._errors]
     def is_collecting(self):
         return self._client is not None
     # return true when the last sample has a time after the target time
