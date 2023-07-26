@@ -137,7 +137,7 @@ class MultiplexAdcCaptureHelper:
             sample = ("error", record_clock, "ERROR_UNKNOWN")
         #TODO: maybe dont log 
         logging.error("MultiplexADC returned an ERROR: %s print_time: %s" \
-                      % (sample[0], record_clock))
+                      % (sample[2], record_clock))
         return sample
     def flush(self):
         # local variables to optimize inner loop below
