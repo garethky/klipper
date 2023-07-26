@@ -2,7 +2,101 @@
 
 This document describes Klipper's support for load cells and load cell based probing.
 
-## TARE_LOAD_CELL load_cell="name"
+## Sensor Support
+In development 3 sensors chips are supported: HX711, HX717 and ADS1263.
+
+### HX71x Chips
+The HX717 and HX711 are low cost 24 bit ADC chips that support2 channels and a limited number of gain settings. They only support bit bang communications and the protocol is based on tight timing which requires turning off the interrupts on the MCU (similar to the Neopixel chips). The HX711 is limited to 80 SPS and the HX711 to 340SPS. Sample rate is selected by either supplying a voltage or grounding on of the legs on the chip.
+
+#### [hx711]
+```
+[hx711 sensor_name]
+sclk_pin: PB7
+#   connected to the clock pin
+dout_pin: PB6
+#   connected to the data output pin
+gain: A-128
+#   Valid values for `gain` are `A-128`, `A-64`, `B-32`. The default is `A-128`. 
+#   `A` denotes the input channel and the number denotes the gain. Only the 3 
+#   listed combinations are supported by the chip. Note that changing the gain 
+#   setting also selects the channel being read.
+sample_rate: 10
+#   Valid values for `sample_rate` are `10` or `80`. The default value is `10`.
+#   This must match the wiring of the chip. The sample rate cannot be changed 
+#   in software.
+```
+
+#### [hx717]
+```
+[hx717 sensor_name]
+sclk_pin: PB7
+#   connected to the clock pin
+dout_pin: PB6
+#   connected to the data output pin
+gain: A-64
+#   Valid values for `gain` are `A-128`, `B-64`, `A-64`, `B-8`. 
+#   `A` denotes the input channel and the number denotes the gain setting. 
+#   Only the 4 listed combinations are supported by the chip. Note that 
+#   changing the gain setting also selects the channel being read.
+sample_rate: 10
+#   Valid values for `sample_rate` are `320`, `80`, `20` or `10`. 
+#   The default is `320`. This must match the wiring of the chip.
+#   The sample rate cannot be changed in software.
+```
+
+`sclk_pin` is connected to the clock pin and `dout_pin` is connected to the data output pin. These parameters are required and have no defaults.
+
+Valid values for `gain` are `A-128`, `B-64`, `A-64`, `B-8`. `A` denotes the input channel and the number denotes the gain setting. Only the 4 listed combinations are supported by the chip. Note that changing the gain setting also selects the channel being read.
+
+
+### ADS1263 Chip
+
+The ADS1263 is a more capable 32 bit sensor with 4 input channels, PGA and up to 32Khz read speeds. Unfortunately its both large and expensive. It was included primarily as a development platform because it can mimic the characteristics of other sensors.
+
+This chip supports CRC for sensor reading integrity and has a chip power cycle event flag so restarts of the chip can be detected. These are important safety features missing in the HX71x chips.
+
+#### [ads1263]
+```
+[ads1263 sensor_name]
+spi_bus: spi3
+cs_pin: SPI3_CS
+#   See the "common SPI settings" section for a description of the
+#   above parameters.
+sample_rate: 8
+#   The chip supports sampling at 2.5, 5, 10, 16.6, 20, 50, 60, 100, 400, 1200,
+#   2400, 4800, 7200, 14400, 19200, and 38400 samples per second.
+#   The value selects an index in that list. e.g. 8 is 400 SPS.
+gain: 5
+#   The chip supports gain settings of 1, 2, 4, 8, 16 and 32. 
+#   The `gain` parameter is the index in that list. e.g. 5 is a gain of 32.
+```
+Channel, gain, filtering and sample frequency and much more are all independently configurable in software. If interested, read the code in ads1263.py for full options list.
+
+This chip also has a set of GCode commands that let you configure more advanced chip functions, dump internal registers etc. Again, if interested, read ads1263.py.
+
+## [load_cell]
+A load_cell wraps a sensor and turns it into a digital scale and, optionally, a printer probe.
+
+```
+[load_cell my_scale]
+sensor: hx717 sensor_name
+#   This must be the full name of one of the compatible sensors
+counts_per_gram: 1
+#   This value converts raw sensor counts to grams.
+#   It is set with the CALIBRATE_LOAD_CELL command.
+#   The default is 1 as a safety measure.
+#   DO NOT COPY this value from another printers config.
+is_probe: True
+#   Enable probe support, the default is False
+trigger_force_grams: 50.0
+#   The force that the probe will trigger at. 50g is the default.
+z_offset: 0.0
+#   Probe z_offset, see [probe] for details
+```
+
+## load_cell GCode Commands
+
+### TARE_LOAD_CELL load_cell="name"
 This command works just like the tare button on scale. It sets the current raw reading of the load cell to be the zero point reference value. The response is the percentage of the sensors range that was read and the raw value in counts.
 ```
 Load cell tare value: 0.05% (32)
@@ -12,7 +106,7 @@ Each load cell need to be tared each time the printer starts. Think of this as s
 
 When using the load cell as a probe this operation also configured the zero point and range for the endstop on the MCU. If the tare value changes significantly before probing you should use `TARE_LOAD_CELL` before probing (TK: maybe this can be automated with continuous tare)
 
-## CALIBRATE_LOAD_CELL load_cell="name"
+### CALIBRATE_LOAD_CELL load_cell="name"
 This command started the guided calibration utility. Calibration is a 3 step process:
 1. First you remove all load from the load cell and run the `TARE` command
 1. Next you apply a known load to the load cell and run the `CALIBRATE GRAMS=nnn` command
@@ -56,7 +150,7 @@ Total capacity: +/- 29.14Kg
 ```
 The `Total capacity` should be close to the rating of the load cell itself. If it much larger you could have used a higher gain setting in the sensor or a more sensitive load cell. This isn't as critical for 32bit and 24bit sensors but is much more critical for low but width sensors.
 
-## READ_LOAD_CELL load_cell="name"
+### READ_LOAD_CELL load_cell="name"
 This command takes a reading from the load cell and displays it as a single line in the console:
 
 Normal calibrated readings include the grans and the percentage of the sensors
@@ -77,7 +171,7 @@ Readings at the limit of the sensors range will result in an error. This means
 Err (100.00%)
 ```
 
-## LOAD_CELL_DIAGNOSTICS load_cell="name"
+### LOAD_CELL_DIAGNOSTICS load_cell="name"
 This command collects 10 seconds of load cell data and reports statistics that may help you diagnose problems.
 
 ```
