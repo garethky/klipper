@@ -188,22 +188,24 @@ Each line explained:
 ```
 // Samples Collected: 108
 ```
-The total number of same readings that the load cell received from the sensor during the test
+The total number of numeric readings that the load cell received from the sensor during the test
 
 ```
 // Good samples: 108, Saturated samples: 0, Unique values: 21
 ```
 * `Good samples` indicate a regular value between the sensors minimum and maximum possible value.
 * `Saturated samples` indicates a value at the minimum or maximum of the sensors range. This would indicate that the true force is even higher and the reading is unusable
-* `Unique values` indicates the number of distinct counts returned. If this number is 1 is probably indicates that the sensor is disconnected.
+* `Unique values` indicates the number of distinct counts returned. If this number is 1 it probably indicates that the sensor is disconnected.
 
 ```
 // Sample range: [-6.05% to -0.78%]
 ```
 Sensors report a range from +100% to -100% based on the number of bits that the sensor has. This gives a total range of 200%. When no load is applied these values should be close to 0%. If you tap or push on the sensor while running `LOAD_CELL_DIAGNOSTICS` this range should increase.
 
+```
 // Sample range / sensor capacity: 2.64%
-This gives the size of the detected values as a percentage of the total 200% range of the sensor. If no force is applied this is a direct measurement of the noise and should be < 5%, lower is better. If you tap or push on the sensor ths range should increase. If you do not see an increase there may be a wiring issue.
+```
+This gives the size of the detected values as a percentage of the total 200% range of the sensor. If no force is applied this is a direct measurement of the noise and should be < 5%, lower is better. If you tap or push on the sensor the range should increase. If you do not see an increase there may be a wiring issue.
 
 ```
 // Errors: 0
@@ -218,10 +220,10 @@ The number of errors that the sensor returned during the sample period. If the
 ```
 
 Here is what each of these errors mean:
-1. `ERROR_SAMPLE_NOT_READY` - The sensor was not ready to produce a new sample value when it was read. This is mostly a warning, but large numbers of these errors indicate that the Sample Per Second of the sensor is misconfigured.
-1. `ERROR_CRC` - The cyclic redundancy check on the sensor reading failed, meaning the reading is corrupt. Check sensor wiring for loose connections or sources of interference.
-1. `ERROR_READ_TIME` - The read process took longer than is allowed on th eMCU. This can be due to high MCU load or a gredy MCU task that interrupts the sensor read for a long time. This indicates that the reading has been lost.
-1. `ERROR_UNKNOWN` - The error code is unregistered in the klippy client. If this happens its due to a bug. (protects against future code changes that introduce new errors)
+1. `ERROR_SAMPLE_NOT_READY` - The sensor was not ready to produce a new sample value when it was read. This is mostly a warning, but large numbers of these errors indicate that the `sample_rate` of the sensor is misconfigured. The reading was lost.
+1. `ERROR_CRC` - The cyclic redundancy check on the sensor reading failed, meaning the reading is corrupt. Check sensor wiring for loose connections or sources of interference. The reading was discarded.
+1. `ERROR_READ_TIME` - The read process took longer than is allowed on the MCU. This can be due to high MCU load or a greedy MCU task that interrupted the sensor read for a long time. This indicates that the reading has been lost.
+1. `ERROR_UNKNOWN` - The error code is unregistered in klippy. If this happens its due to a bug. (protects against future code changes that introduce new error types)
 
 
 

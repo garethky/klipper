@@ -164,7 +164,7 @@ class LoadCellGuidedCalibrationHelper:
     # given tare bias, at saturation
     def capacity_kg(self, counts_per_gram):
         min, max = self.load_cell.saturation_range()
-        return int((max - abs(self.tare_counts)) / counts_per_gram) / 1000.
+        return int((max - abs(self._tare_counts)) / counts_per_gram) / 1000.
     def finalize(self, save_results = False):
         for name in ['ABORT', 'ACCEPT', 'TARE', 'CALIBRATE']:
             self.gcode.register_command(name, None)
@@ -204,8 +204,8 @@ class LoadCellGuidedCalibrationHelper:
         grams = gcmd.get_float("GRAMS", minval=50., maxval=25000.)
         cal_counts = self._avg_counts()
         cal_percent = self.load_cell.counts_to_percent(cal_counts)
-        c_per_g = self._counts_per_gram(grams, cal_counts)
-        cap_kg = self.capacity_kg(self.load_cell, c_per_g)
+        c_per_g = self.counts_per_gram(grams, cal_counts)
+        cap_kg = self.capacity_kg(c_per_g)
         gcmd.respond_info("Calibration value: %.2f%% (%i), Counts/gram: %.5f, \
             Total capacity: +/- %0.2fKg"
                 % (cal_percent, cal_counts, c_per_g, cap_kg))
@@ -334,7 +334,7 @@ class LoadCell:
                         , probe.PrinterProbe(config, self.load_cell_endstop))
         # sensor must implement LoadCellDataSource
         self.tare_counts = None
-        self.counts_per_gram = config.getint('counts_per_gram', minval=1
+        self.counts_per_gram = config.getfloat('counts_per_gram', minval=1.
                                             , default=None)
         LoadCellCommandHelper(config, self)
         self.trigger_force_grams = config.getfloat('trigger_force_grams'
