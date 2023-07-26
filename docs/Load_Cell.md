@@ -94,7 +94,7 @@ z_offset: 0.0
 #   Probe z_offset, see [probe] for details
 ```
 
-## load_cell GCode Commands
+## [load_cell] GCode Commands
 
 ### TARE_LOAD_CELL load_cell="name"
 This command works just like the tare button on scale. It sets the current raw reading of the load cell to be the zero point reference value. The response is the percentage of the sensors range that was read and the raw value in counts.
@@ -171,7 +171,7 @@ Readings at the limit of the sensors range will result in an error. This means
 Err (100.00%)
 ```
 
-### LOAD_CELL_DIAGNOSTICS load_cell="name"
+### LOAD_CELL_DIAGNOSTIC load_cell="name"
 This command collects 10 seconds of load cell data and reports statistics that may help you diagnose problems.
 
 ```
