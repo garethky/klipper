@@ -25,7 +25,7 @@ static uint_fast8_t endstop_oversample_event(struct timer *t);
 
 // Timer callback for an end stop
 static uint_fast8_t
-endstop_event(struct timer *t)
+watchdog_event(struct timer *t)
 {
     struct endstop *e = container_of(t, struct endstop, time);
     uint8_t val = gpio_in_read(e->pin);
@@ -48,7 +48,7 @@ endstop_oversample_event(struct timer *t)
     uint8_t val = gpio_in_read(e->pin);
     if ((val ? ~e->flags : e->flags) & ESF_PIN_HIGH) {
         // No longer matching - reschedule for the next attempt
-        e->time.func = endstop_event;
+        e->time.func = watchdog_event;
         e->time.waketime = e->nextwake;
         e->trigger_count = e->sample_count;
         return SF_RESCHEDULE;
@@ -87,7 +87,7 @@ command_endstop_home(uint32_t *args)
         return;
     }
     e->rest_time = args[4];
-    e->time.func = endstop_event;
+    e->time.func = watchdog_event;
     e->trigger_count = e->sample_count;
     e->flags = ESF_HOMING | (args[5] ? ESF_PIN_HIGH : 0);
     e->ts = trsync_oid_lookup(args[6]);
