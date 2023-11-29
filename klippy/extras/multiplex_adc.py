@@ -67,7 +67,7 @@ class WebRequestShim:
 # 
 MIN_MSG_TIME = 0.100
 UPDATE_INTERVAL = .5  # update printer object at 2Hz
-TIME_CODE_ERROR = 0xff
+TIME_CODE_ERROR = 0x000000ff
 SAMPLES_PER_TRANSMISSION = 9
 # Sample error types
 ERROR_OVERFLOW = 0
@@ -95,6 +95,7 @@ class MultiplexAdcCaptureHelper:
         self.last_chip_clock = 0
         self.static_delay = 0
         self._unpack_int32_from = struct.Struct('<i').unpack_from
+        self._unpack_uint32_from = struct.Struct('<I').unpack_from
         freq = mcu.seconds_to_clock(1.)
         while (float(TIME_CODE_ERROR << self.time_shift) / freq) < 0.002:
             self.time_shift += 1
@@ -127,7 +128,9 @@ class MultiplexAdcCaptureHelper:
         return self.start_clock != 0
     def _process_error(self, error, record_clock):
         sample = None
-        if error == ERROR_SAMPLE_NOT_READY:
+        if error == ERROR_OVERFLOW:
+            sample = ("error", record_clock, "ERROR_OVERFLOW")
+        elif error == ERROR_SAMPLE_NOT_READY:
             sample = ("error", record_clock, "ERROR_SAMPLE_NOT_READY")
         elif error == ERROR_CRC:
             sample = ("error", record_clock, "ERROR_CRC")
@@ -142,12 +145,14 @@ class MultiplexAdcCaptureHelper:
     def flush(self):
         # local variables to optimize inner loop below
         capture_buffer = self.capture_buffer
-        static_delay = self.static_delay
-        sample_ticks = self.sample_ticks
-        start_clock = self.start_clock
+        #static_delay = self.static_delay
+        #sample_ticks = self.sample_ticks
+        #start_clock = self.start_clock
         #time_shift = self.time_shift
         clock_to_print_time = self.mcu.clock_to_print_time
+        clock32_to_clock64 = self.mcu.clock32_to_clock64
         unpack_int32_from = self._unpack_int32_from
+        unpack_uint32_from = self._unpack_uint32_from 
         last_sequence = self.last_sequence
         # Process every message in capture_buffer
         num_samples = len(capture_buffer)
@@ -161,27 +166,29 @@ class MultiplexAdcCaptureHelper:
                 seq += 0x10000
             last_sequence = seq
             # Each data frame that comes from the sensor has SAMPLES_PER_TRANSMISSION samples inside it
-            msg_mclock = start_clock + (seq * SAMPLES_PER_TRANSMISSION * sample_ticks)
+            #msg_mclock = start_clock + (seq * SAMPLES_PER_TRANSMISSION * sample_ticks)
             # the call to bytearray is only required for python2
             d = bytearray(params['data'])
             data_len = len(d)
-            record_clock = msg_mclock
+            #record_clock = msg_mclock
             i = 0
             try:
                 while i < data_len:
-                    record_clock += sample_ticks
-                    time_diff = d[i]
-                    i += 1
+                    #record_clock += sample_ticks
+                    #time_diff = d[i]
+                    tcode = unpack_uint32_from(d, offset=i)[0]
+                    i += 4
                     sample = unpack_int32_from(d, offset=i)[0]
                     i += 4
-                    if time_diff == TIME_CODE_ERROR:
-                        samples.append(self._process_error(sample, clock_to_print_time(record_clock)))
+                    if tcode == TIME_CODE_ERROR:
+                        samples.append(self._process_error(sample, 0.))
                     else:
+                        sample_print_time = clock_to_print_time(clock32_to_clock64(tcode))
                         # timestamp is record_clock + offset shifted by time_shift
-                        sample_clock = record_clock + time_diff
+                        # sample_clock = record_clock + time_diff
                         samples.append(["sample",
-                                        clock_to_print_time(sample_clock),
-                                        sample, time_diff])
+                                        sample_print_time,
+                                        sample, 0])
             except Exception:
                 logging.exception("Load Cell Samples threw an exception: " \
                     "%s (%i) i: %i" % (binascii.hexlify(d), data_len, i))
@@ -244,13 +251,16 @@ class MultiplexAdcSensorWrapper():
         return self.sensor.get_samples_per_second()
     def get_clock_ticks_per_sample(self):
         sample_period = 1. / float(self.get_samples_per_second())
+        #sample_period = 1. / 40000.0  # 40Khz
         return self.mcu.seconds_to_clock(sample_period)
     def start_capture(self):
         if self.is_capturing():
             return False
         logging.debug("Starting multiplex_adc '%s' capture", self.name)
         self.sensor.start_capture()
-        self.samples.start_capture(self.get_clock_ticks_per_sample())
+        sample_period = 1. / 40000.0  # 40Khz
+        sample_ticks = self.mcu.seconds_to_clock(sample_period)
+        self.samples.start_capture(sample_ticks)
         logging.debug("Stared multiplex_adc '%s' capture", self.name)
         return True
     def stop_capture(self):

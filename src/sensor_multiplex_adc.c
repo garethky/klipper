@@ -12,15 +12,19 @@
 #include "sched.h" // DECL_TASK
 #include "load_cell_endstop.h" // load_cell_endstop_report_sample
 #include "sensor_multiplex_adc.h" // mux_adc_sample
+#if CONFIG_HAVE_GPIO_SPI
 #include "sensor_ads1263.h" // ads1263_query
+#endif
+#if CONFIG_HAVE_GPIO_BITBANG
 #include "sensor_hx71x.h" // hx711_query
+#endif
 
 enum { SENSOR_ADS1263, SENSOR_HX71X, SENSOR_ENUM_MAX };
 
 DECL_ENUMERATION("mux_adc_sensor_type", "ads1263", SENSOR_ADS1263);
 DECL_ENUMERATION("mux_adc_sensor_type", "hx71x", SENSOR_HX71X);
 
-enum { TCODE_ERROR = 0xff };
+enum { TCODE_ERROR = 0x000000ff };
 
 // Sample Error Types
 enum {
@@ -37,7 +41,7 @@ enum {
     WAIT_NEXT_SAMPLE, WAIT_SAMPLE_DUPLICATE
 };
 
-#define SAMPLE_WIDTH 5
+#define SAMPLE_WIDTH 8
 #define SAMPLE_NOT_READY_DELAY timer_from_us(200)
 
 struct mux_adc {
@@ -52,7 +56,7 @@ struct mux_adc {
     struct load_cell_endstop *load_cell_endstop;
     uint8_t flags, sensor_type, sensor_oid, data_count, time_shift, overflow;
     // dont try to send anything larger than 48 bytes over the USB bus
-    uint8_t data[SAMPLE_WIDTH * 9];
+    uint8_t data[SAMPLE_WIDTH * 6];
 };
 
 static struct task_wake wake_multiplex_adc;
@@ -84,15 +88,19 @@ mux_adc_report(struct mux_adc *mux_adc, uint8_t oid)
 
 // Append an entry to the measurement buffer
 static void
-append_measurement(struct mux_adc *mux_adc, uint_fast8_t tcode
+append_measurement(struct mux_adc *mux_adc, uint_fast32_t tcode
                             , uint_fast32_t data)
 {
-    mux_adc->data[mux_adc->data_count] = tcode;
+    // time or error code
+    mux_adc->data[mux_adc->data_count + 0] = tcode;
+    mux_adc->data[mux_adc->data_count + 1] = tcode >> 8;
+    mux_adc->data[mux_adc->data_count + 2] = tcode >> 16;
+    mux_adc->data[mux_adc->data_count + 3] = tcode >> 24;
     // raw adc counts
-    mux_adc->data[mux_adc->data_count + 1] = data;
-    mux_adc->data[mux_adc->data_count + 2] = data >> 8;
-    mux_adc->data[mux_adc->data_count + 3] = data >> 16;
-    mux_adc->data[mux_adc->data_count + 4] = data >> 24;
+    mux_adc->data[mux_adc->data_count + 4] = data;
+    mux_adc->data[mux_adc->data_count + 5] = data >> 8;
+    mux_adc->data[mux_adc->data_count + 6] = data >> 16;
+    mux_adc->data[mux_adc->data_count + 7] = data >> 24;
     mux_adc->data_count += SAMPLE_WIDTH;
 }
 
@@ -127,7 +135,7 @@ add_adc_data(struct mux_adc *mux_adc, uint32_t sample_time)
                         , mux_adc->sample.measurement_time);
     }
 
-    append_measurement(mux_adc, tdiff, mux_adc->sample.counts);
+    append_measurement(mux_adc, sample_time, mux_adc->sample.counts);
 }
 
 // use the contents of the sample container to report
@@ -139,7 +147,8 @@ add_sensor_result(struct mux_adc *mux_adc, uint32_t sample_time) {
     } else if (mux_adc->sample.crc_error) {
         append_error(mux_adc, SE_CRC);
     } else if (mux_adc->sample.sample_not_ready) {
-        append_error(mux_adc, SE_NOT_READY);
+        // skip appending errors for oversampling, they are expected
+        // append_error(mux_adc, SE_NOT_READY);
     } else {
         add_adc_data(mux_adc, sample_time);
     }
@@ -153,14 +162,22 @@ void read_sensor(struct mux_adc *mux_adc) {
     mux_adc->sample.measurement_time = 0;
     mux_adc->sample.counts = 0;
 
+    #if CONFIG_HAVE_GPIO_SPI
     // read from the configured sensor
     if (mux_adc->sensor_type == SENSOR_ADS1263) {
         struct ads1263_sensor *ads = ads1263_oid_lookup(mux_adc->sensor_oid);
         ads1263_query(ads, &mux_adc->sample);
-    } else if (mux_adc->sensor_type == SENSOR_HX71X) {
+        return;
+    }
+    #endif
+    
+    #if CONFIG_HAVE_GPIO_BITBANGING
+    if (mux_adc->sensor_type == SENSOR_HX71X) {
         struct hx71x_sensor *hx = hx71x_oid_lookup(mux_adc->sensor_oid);
         hx71x_query(hx, &mux_adc->sample);
+        return;
     }
+    #endif
 }
 
 // Send load_cell_data message if buffer is full
@@ -204,11 +221,6 @@ command_query_multiplex_adc(uint32_t *args)
     mux_adc->flags = 0;
     if (!args[2]) {
         // End measurements
-        /**
-        if (mux_adc->load_cell_endstop) {
-            load_cell_endstop_source_stopped(mux_adc->load_cell_endstop);
-        }
-        */
         if (mux_adc->data_count) {
             mux_adc_report(mux_adc, oid);
         }

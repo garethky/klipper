@@ -19,6 +19,12 @@
 void
 ads1263_query(struct ads1263_sensor *ads, struct mux_adc_sample *sample)
 {
+    // if the pin is high the sample is not ready
+    if (gpio_in_read(ads->drdy)) {
+        sample->sample_not_ready = 1;
+        return;
+    }
+
     uint8_t msg[7] = { 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
     uint32_t measurement_time = timer_read_time();
     spidev_transfer(ads->spi, 1, sizeof(msg), msg);
@@ -55,14 +61,16 @@ command_config_ads1263(uint32_t *args)
 {
     struct ads1263_sensor *ads = oid_alloc(args[0]
                                     , command_config_ads1263, sizeof(*ads));
+    
     ads->spi = spidev_oid_lookup(args[1]);
     if (!spidev_have_cs_pin(ads->spi))
         shutdown("ADS 1263 sensor requires cs pin");
+    ads->drdy = gpio_in_setup(args[2], -1);
 }
-DECL_COMMAND(command_config_ads1263, "config_ads1263 oid=%c spi_oid=%c");
+DECL_COMMAND(command_config_ads1263, "config_ads1263 oid=%c spi_oid=%c" \
+                                    " drdy_pin=%u");
 
-
-// Lookup a look up an hx71x sensor instance by oid
+// Lookup a look up an ads1263 sensor instance by oid
 struct ads1263_sensor *
 ads1263_oid_lookup(uint8_t oid)
 {

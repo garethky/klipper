@@ -314,8 +314,8 @@ class LoadCellSampleCollector():
 class LoadCell:
     def __init__(self, config):
         try:
-            import numpy as np
-        except:
+            import numpy
+        except Exception:
             raise config.error("LoadCell requires the numpy module")
         self.printer = printer = config.get_printer()
         self.name = name = config.get_name()
@@ -432,7 +432,7 @@ class LoadCell:
         return {'is_calibrated': self.is_calibrated()
                 , 'tare_counts': self.tare_counts
                 , 'counts_per_gram': self.counts_per_gram
-                , 'is_probe': self.load_cell_endstop != None}
+                , 'is_probe': self.load_cell_endstop is not None}
 
 def load_config_prefix(config):
     return LoadCell(config)

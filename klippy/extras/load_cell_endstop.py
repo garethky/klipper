@@ -1,14 +1,10 @@
 import logging, time, chelper
 from mcu import TRSYNC_SINGLE_MCU_TIMEOUT, TRSYNC_TIMEOUT, MCU_trsync
-from . import motion_report
 
 class CollisionAnalyzer:
     def __init__(self, samples, probe_start_time, probe_end_time,
                  trigger_time):
-        try:
-            import numpy as np
-        except:
-            raise config.error("LoadCell Probe requires the numpy module")
+        import numpy as np
         self._samples = np.asarray(samples).astype(float)
         self._probe_start_time = probe_start_time
         self._probe_end_time = probe_end_time
@@ -26,24 +22,31 @@ class CollisionAnalyzer:
         # trim to interesting samples
         self.trim_to_probing()
         # select elbow
-        self._elbow_index = self.select_elbow_point(self._start_index, self._end_index)
+        self._elbow_index = self.select_elbow_point(self._start_index,
+                                                    self._end_index)
         end_time = time.time()
         elapsed = end_time - start_time
-        logging.info("start_index: %s, elbow index, %s, end_index: %s. Time taken: %ss" % (self._start_index, self._elbow_index, self._end_index, elapsed))
-        self._collision_force, self._collision_time = \
-            self.calculate_collision(self._start_index, self._elbow_index,
-                                     self._end_index)
+        #logging.info("start_index: %s, elbow index, %s, end_index: %s. Time taken: %ss"
+        #             % (self._start_index, self._elbow_index, self._end_index, elapsed))
+        self._collision_force = 0
+        self._collision_time = self.calculate_collision(
+            self._start_index, self._elbow_index, self._end_index)
+        #self._collision_time = self.calculate_dumb_collision(
+        #    self._start_index, self._elbow_index, self._end_index)
         end_time = time.time()
         elapsed = end_time - start_time
-        logging.info("collision force: %s, collision time, %s.  Time taken: %ss" % (self._collision_force, self._collision_time, elapsed))
+        #logging.info("collision force: %s, collision time, %s.  Time taken: %ss"
+        #             % (self._collision_force, self._collision_time, elapsed))
     def trim_to_probing(self):
+        import numpy as np
         # find the trigger index:
         trigger_index = 0
         for i in reversed(range(len(self._samples))):
             trigger_index = i
             if self._samples[i][0] <= self._trigger_time:
                 break
-        
+        # TODO: make this some multiple of the probing speed
+        # - OR - 
         # take up to 200ms of data from before the probe triggered:
         half_second = self._trigger_time - 0.2
         for i in reversed(range(0, trigger_index)):
@@ -51,75 +54,89 @@ class CollisionAnalyzer:
                 self._start_index = i
                 break
         # look forward from the trigger_index for increasing force
-        self._end_index = trigger_index
-        trigger_force = self._samples[trigger_index][1]
-        for i in range(trigger_index + 1, len(self._samples)):
-            f1 = self._samples[i][1]
-            f2 = self._samples[i - 1][1]
-            if trigger_force >= 0 and f1 > f2:
-                self._end_index += 1
-            elif trigger_force < 0 and f1 < f2:
-                self._end_index += 1
-            else:
-                break
+        self._end_index = len(self._samples) - 1
+        #trigger_force = self._samples[trigger_index][1]
+        #for i in range(trigger_index + 1, len(self._samples)):
+        #    f1 = self._samples[i][1]
+        #    f2 = self._samples[i - 1][1]
+        #    if trigger_force >= 0 and f1 > f2:
+        #        self._end_index += 1
+        #    elif trigger_force < 0 and f1 < f2:
+        #        self._end_index += 1
+        #    else:
+        #        break
+        with open('/home/pi/printer_data/logs/loadcell.log', 'a') as log:
+            log.write("{\"time\": %s," % (np.array2string(self._time[self._start_index:self._end_index], separator=',', threshold=50000)))
+            log.write("\"force\": %s," % (np.array2string(self._force[self._start_index:self._end_index], separator=',', threshold=50000)))
+            log.write("\"trigger_index\": %s," % (trigger_index - self._start_index))
+            log.write("\"trigger_time\": %s," % (self._trigger_time))
+    # perpendicular distance from point p to line l1, l2
+    def _perpendicular_distance(self, l1_x, l1_y, l2_x, l2_y, p_x, p_y):
+        import numpy as np
+        l1=np.array([l1_x, l1_y])
+        l2=np.array([l2_x, l2_y])
+        point = np.array([p_x, p_y])
+        return abs(np.cross(l2-l1,point-l1)/np.linalg.norm(l2-l1))
     def select_elbow_point(self, start_index, end_index):
-        best_fit = float("inf")
-        # this assumes fit will improve as the elbow point goes left
-        elbow_index = end_index - 2
-        for i in reversed(range(start_index + 2, elbow_index)):
-            new_fit = self.check_elbow_fit(start_index, i, end_index)
-            if new_fit <= best_fit:
-                best_fit = new_fit
-                elbow_index = i
-            else:
-                break
-        return elbow_index # best fit found
+        import numpy as np
+        sub_time = self._time[start_index:end_index]
+        sub_force = self._force[start_index:end_index]
+        x_coords = [sub_time[0], sub_time[-1]]
+        y_coords = [sub_force[0], sub_force[-1]]
+        x_stacked = np.vstack([x_coords, np.ones(2)]).T
+        mx, b = np.linalg.lstsq(x_stacked, y_coords, rcond=None)[0]
+        # now compute the Y delta of the line value for every x
+        delta_y = np.abs(((mx * sub_time) + b) - sub_force)
+        elbow_index = np.argmax(delta_y)
+        # elbow point is point of max curvature, but which series does it
+        # belong to, approach or collision?
+        delta_to_approach = self._perpendicular_distance(
+                sub_time[0], delta_y[0],
+                sub_time[elbow_index - 1], delta_y[elbow_index - 1],
+                sub_time[elbow_index], delta_y[elbow_index])
+        delta_to_collision = self._perpendicular_distance(
+                sub_time[elbow_index + 1], delta_y[elbow_index + 1],
+                sub_time[-1], delta_y[-1],
+                sub_time[elbow_index], delta_y[elbow_index])
+        # use the perpendicular distance to decide which its closer to:
+        #if (delta_to_approach < delta_to_collision):
+        elbow_index += 1
+        return start_index + elbow_index  # best fit found
+    def calculate_dumb_collision(self, start_index, elbow_index, end_index):
+        return (self._time[elbow_index - 1] + self._time[elbow_index]) / 2
+    def polyfit_collision(self, elbow_index):
+        # https://stackoverflow.com/questions/16827053/solving-for-x-values-of-polynomial-with-known-y
+        from numpy.polynomial import Polynomial as P
+        end_i = elbow_index + 5
+        sub_time = self._time[elbow_index:end_i]
+        sub_force = self._force[elbow_index:end_i]
+        elbow_time = self._time[elbow_index]
+        #TODO: make the order of the polynomial configurable in klipper config
+        # note: order 1 == linear fit, which might be a + for perfect machines
+        p = P.fit(sub_time, sub_force, 4)
+        roots = (p - 0.).roots()
+        # want a root that is closest to elbow_time
+        selected_root = None
+        root_distance = float("inf")
+        for root in roots:
+            if abs(elbow_time - root) < root_distance:
+                root_distance = abs(elbow_time - root)
+                selected_root = root
+        #if not selected_root.imag == 0.0:
+            #logging.error("Polynomial Root is not real %s, %s" % (selected_root, roots))
+        return selected_root.real
     def calculate_collision(self, start_index, elbow_index, end_index):
-        #slope, c = self.least_squares(self._time, self._force,
-        #                                        elbow_index, end_index)[0]
-        pre_elbow_time = self._samples[elbow_index - 1][0]
-        pre_elbow_force = self._samples[elbow_index - 1][1]
-        elbow_time = self._samples[elbow_index][0]
-        elbow_force = self._samples[elbow_index][1]
-        end_force = self._samples[end_index][1]
-
-        # calculate average force per unit time (assumes axis moves ~constant velocity)
-        avg_force = (end_force - pre_elbow_force) / (end_index - elbow_index - 1)
-        # what percentage of that average force change is the elbow point away from the point just before it?
-        # this has to be clamped to 1. because large force changes are not physically possible
-        elbow_force_percent = min(1., abs((elbow_force - pre_elbow_force) / avg_force))
-        # time between the two points
-        time_d = elbow_time - pre_elbow_time
-        time_delta = time_d * elbow_force_percent
-        return pre_elbow_force, pre_elbow_time + (time_d - time_delta)
-    def check_elbow_fit(self, start_index, elbow_index, end_index):
-        import numpy as np
-        m1, resid_pre = self.least_squares(self._time, self._force,
-                                                start_index, elbow_index)
-        m2, resid_post = self.least_squares(self._time, self._force,
-                                                elbow_index + 1, end_index)
-        logging.info("Pre collision fit: %s, post collision fit: %s" 
-                     % (np.sum(resid_pre), np.sum(resid_post)))
-        
-        t0 = self._samples[start_index][0]
-        t1 = self._samples[elbow_index][0]
-        self._pre_collision_line = [{"time": t0, "force": m1[0] * t0 + m1[1]},
-                                    {"time": t1, "force": m1[0] * t1 + m1[1]}]
-        # solve the second line for elbow - 1 to end
-        t2 = self._samples[elbow_index + 1][0]
-        t3 = self._samples[end_index][0]
-        self._post_collision_line = [{"time": t2, "force": m2[0] * t2 + m2[1]},
-                                     {"time": t3, "force": m2[0] * t3 + m2[1]}]
-
-        return np.sum(resid_pre) + np.sum(resid_post)
-    # compute least squares of a sub-array
-    def least_squares(self, x, y, start_index, end_index):
-        import numpy as np
-        sub_x = x[start_index:end_index]
-        sub_y = y[start_index:end_index]
-        x_stacked = np.vstack([sub_x, np.ones(len(sub_x))]).T
-        mxb, residuals, _, _ = np.linalg.lstsq(x_stacked, sub_y, rcond=None)
-        return mxb, residuals
+        lower_bound = self._time[elbow_index - 1]
+        upper_bound = self._time[elbow_index]
+        result_1 = self.polyfit_collision(elbow_index)
+        if result_1 >= lower_bound and result_1 <= upper_bound:
+            return result_1
+        result_2 = self.polyfit_collision(elbow_index - 1)
+        if result_2 < lower_bound:
+            return lower_bound
+        if result_2 > upper_bound:
+            return upper_bound
+        return result_2
     def get_endstop_event(self):
         series = []
         collision_area = self._samples[self._start_index : self._end_index]
@@ -131,16 +148,16 @@ class CollisionAnalyzer:
             })
         return {
             "series": series,
-            "pre_collision_line": self._pre_collision_line,
-            "post_collision_line": self._post_collision_line,
+            #"pre_collision_line": self._pre_collision_line,
+            #"post_collision_line": self._post_collision_line,
             "collision_point": [{"time": self._collision_time,
                                  "force": self._collision_force}],
-            "elbow_point": [{"time": self._samples[self._elbow_index][0],
-                             "force": self._samples[self._elbow_index][1]}],
+            "elbow_point": [{"time": self._time[self._elbow_index],
+                             "force": self._force[self._elbow_index]}],
             "trigger_point": [{"time": self._trigger_time,
-                             "force": self._samples[self._end_index - 2][1]}],
-            "end_point": [{"time": self._samples[self._end_index][0],
-                           "force": self._samples[self._end_index][1]}],
+                             "force": self._force[self._end_index - 2]}],
+            "end_point": [{"time": self._time[self._end_index],
+                           "force": self._force[self._end_index]}],
             "home_start_time": self._probe_start_time,
             "trigger_time": self._trigger_time,
             "homing_end_time": self._probe_end_time,
@@ -176,6 +193,7 @@ class LoadCellEndstop:
         self.trigger_counts = 0  # this needs to be read from the conifg and maybe pushed in when the load cell calibrates
         self.tare_counts = 0  # this needs to be pushed in every time the load cell tares
         self._home_start_time = 0
+        self.probe_move = None
         self.sample_count = config.getint("sample_count"
             , default=DEFAULT_SAMPLE_COUNT, minval=1, maxval=5)
         self._mcu.add_config_cmd("config_load_cell_endstop oid=%d"
@@ -263,8 +281,6 @@ class LoadCellEndstop:
         ffi_main, ffi_lib = chelper.get_ffi()
         ffi_lib.trdispatch_start(self._trdispatch, etrsync.REASON_HOST_REQUEST)
         # duplicode end
-
-        logging.info("LOAD_CELL_ENDSTOP: Homing Started")
         self._set_range_cmd.send([self._oid, self.trigger_counts,
                                 self.tare_counts])
         self._home_cmd.send([self._oid, etrsync.get_oid()
@@ -274,12 +290,12 @@ class LoadCellEndstop:
         self._sample_collector.start_collecting()
         return self._trigger_completion
     def home_wait(self, home_end_time):
+        self.home_end_time = home_end_time
         etrsync = self._trsyncs[0]
         etrsync.set_home_end_time(home_end_time)
         if self._mcu.is_fileoutput():
             self._trigger_completion.complete(True)
         self._trigger_completion.wait()
-        logging.info("LOAD_CELL_ENDSTOP: Endstop Triggered")
         # trigger has happened, now to find out why...
         ffi_main, ffi_lib = chelper.get_ffi()
         ffi_lib.trdispatch_stop(self._trdispatch)
@@ -293,19 +309,26 @@ class LoadCellEndstop:
         if self._mcu.is_fileoutput():
             self._sample_collector.stop_collecting()
             return home_end_time
-        logging.info("LOAD_CELL_ENDSTOP: Trigger Is Good")
         params = self._query_cmd.send([self._oid])
         # clear trsync from load_cell_endstop
         self._home_cmd.send([self._oid, 0, 0, 0, 0, 0, 0])
         # The time of the first sample that triggered is in "trigger_ticks"
         trigger_ticks = self._mcu.clock32_to_clock64(params['trigger_ticks'])
         trigger_time = self._mcu.clock_to_print_time(trigger_ticks)
-        # keep recording until at least when the homing stopped
-        samples = self._sample_collector.collect_until(home_end_time)
+        self.last_trigger_time = trigger_time
+        return trigger_time
+    def pullback_end(self, pullback_end_time):
+        samples = self._sample_collector.collect_until(pullback_end_time)
         analyzer = CollisionAnalyzer(samples,
-                    self._home_start_time, home_end_time, trigger_time)
+                    self._home_start_time,
+                    pullback_end_time,
+                    self.last_trigger_time)
         self._load_cell.send_endstop_event(analyzer.get_endstop_event())
-        return analyzer.get_collision_time()
+        analyzer.get_collision_time()
+        with open('/home/pi/printer_data/logs/loadcell.log', 'a') as log:
+            log.write("\"home_end_time\": %s," % (self.home_end_time))
+            log.write("\"pullback_end_time\": %s," % (pullback_end_time))
+        return pullback_end_time
     def query_endstop(self, print_time):
         clock = self._mcu.print_time_to_clock(print_time)
         if self._mcu.is_fileoutput():
@@ -321,12 +344,11 @@ class LoadCellEndstop:
     def multi_probe_end(self):
         pass
     def probe_prepare(self, hmove):
+        #TODO: BLTouch has a more sophisticated version of this idea that may save some time
         # Before beginning probing, make sure any retract moves have completed
         # this makes sure the retract happens before the trsync gets armed
         toolhead = self._printer.lookup_object('toolhead')
-        toolhead.dwell(0.1)
-        toolhead.wait_moves()
-        #self.gcode.run_script_from_command("QUERY_PROBE")
+        toolhead.dwell(0.001)
+        toolhead.wait_moves()        
     def probe_finish(self, hmove):
-        #self.gcode.run_script_from_command("QUERY_PROBE")
         pass
