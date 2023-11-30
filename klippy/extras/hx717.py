@@ -29,12 +29,10 @@ class HX717(multiplex_adc.MultiplexAdcSensor):
     def _build_config(self):
         logging.info("creating HX717 config_hx71x oid=%d dout_pin=%s" \
                                     " sclk_pin=%s gain_channel=%d"
-            % (self.oid, self.dout_pin, self.sclk_pin
-               , self.gain_channel))
-        self.mcu.add_config_cmd("config_hx71x oid=%c dout_pin=%s" \
+            % (self.oid, self.dout_pin, self.sclk_pin, self.gain_channel))
+        self.mcu.add_config_cmd("config_hx71x oid=%d dout_pin=%s" \
                                     " sclk_pin=%s gain_channel=%d"
-            % (self.oid, self.dout_pin, self.sclk_pin
-               , self.gain_channel))
+            % (self.oid, self.dout_pin, self.sclk_pin, self.gain_channel))
     def get_oid(self):
         return self.oid
     def get_mux_adc_sensor_type(self):

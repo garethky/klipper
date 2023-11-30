@@ -3,6 +3,7 @@
 # Copyright (C) 2022 Gareth Farrington <gareth@waves.ky>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+import copy
 import logging, collections
 from . import probe, load_cell_endstop, multiplex_adc
 
@@ -267,9 +268,9 @@ class LoadCellSampleCollector():
             self._client.close()
             self._client = None
     def get_samples(self):
-        return [*self._samples]
+        return copy.copy(self._samples)
     def get_errors(self):
-        return [*self._errors]
+        return copy.copy(self._errors)
     def is_collecting(self):
         return self._client is not None
     # return true when the last sample has a time after the target time
