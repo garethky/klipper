@@ -41,8 +41,8 @@ ads1263_query(struct ads1263_sensor *ads, struct mux_adc_sample *sample)
     }
     // check for a timing error
     else if ((read_end_time - measurement_time) > MAX_SPI_READ_TIME) {
-        sample->timing_error = 1;
-        return;
+        // if this happens mcu is probably overloaded
+        shutdown("ADS1263 read timing error, read took too long");
     }
 
     // TODO: perform CRC check

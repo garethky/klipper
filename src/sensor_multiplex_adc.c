@@ -4,6 +4,7 @@
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
+#include "autoconf.h" // CONFIG_HAVE_GPIO_BITBANGING
 #include "basecmd.h" // oid_alloc
 #include "board/misc.h" // timer_read_time
 #include "board/gpio.h" // gpio_out_write
@@ -12,51 +13,31 @@
 #include "sched.h" // DECL_TASK
 #include "load_cell_endstop.h" // load_cell_endstop_report_sample
 #include "sensor_multiplex_adc.h" // mux_adc_sample
-#if CONFIG_HAVE_GPIO_SPI
 #include "sensor_ads1263.h" // ads1263_query
-#endif
-#if CONFIG_HAVE_GPIO_BITBANG
 #include "sensor_hx71x.h" // hx711_query
-#endif
 
 enum { SENSOR_ADS1263, SENSOR_HX71X, SENSOR_ENUM_MAX };
 
 DECL_ENUMERATION("mux_adc_sensor_type", "ads1263", SENSOR_ADS1263);
 DECL_ENUMERATION("mux_adc_sensor_type", "hx71x", SENSOR_HX71X);
 
-enum { TCODE_ERROR = 0x000000ff };
-
-// Sample Error Types
-enum {
-    SE_OVERFLOW, SE_SCHEDULE, SE_READ_TIME, SE_CRC, SE_NOT_READY
-};
-
 // Flag types
 enum {
     FLAG_PENDING = 1<<0
 };
 
-// Wait Types
-enum {
-    WAIT_NEXT_SAMPLE, WAIT_SAMPLE_DUPLICATE
-};
-
-#define SAMPLE_WIDTH 8
-#define SAMPLE_NOT_READY_DELAY timer_from_us(200)
+#define SAMPLE_WIDTH 4
 
 struct mux_adc {
     struct timer timer;
-    // ticks between samples, determined by the sample rate of the sensor
-    uint32_t sample_interval_ticks;
     // time to wait for the next wakeup
     uint32_t rest_ticks;
     uint16_t sequence;
     struct mux_adc_sample sample;
-    // TODO: support 1 endstop for each channel on the ADC
     struct load_cell_endstop *load_cell_endstop;
-    uint8_t flags, sensor_type, sensor_oid, data_count, time_shift, overflow;
+    uint8_t flags, sensor_type, sensor_oid, data_count, overflow;
     // dont try to send anything larger than 48 bytes over the USB bus
-    uint8_t data[SAMPLE_WIDTH * 6];
+    uint8_t data[SAMPLE_WIDTH * 12];
 };
 
 static struct task_wake wake_multiplex_adc;
@@ -86,48 +67,32 @@ mux_adc_report(struct mux_adc *mux_adc, uint8_t oid)
     mux_adc->sequence++;
 }
 
-// Append an entry to the measurement buffer
+// Report local measurement buffer
 static void
-append_measurement(struct mux_adc *mux_adc, uint_fast32_t tcode
-                            , uint_fast32_t data)
+send_mux_adc_status(uint8_t oid, uint32_t mcu_time, uint32_t duration
+                    , uint16_t next_sequence, uint8_t pending)
 {
-    // time or error code
-    mux_adc->data[mux_adc->data_count + 0] = tcode;
-    mux_adc->data[mux_adc->data_count + 1] = tcode >> 8;
-    mux_adc->data[mux_adc->data_count + 2] = tcode >> 16;
-    mux_adc->data[mux_adc->data_count + 3] = tcode >> 24;
-    // raw adc counts
-    mux_adc->data[mux_adc->data_count + 4] = data;
-    mux_adc->data[mux_adc->data_count + 5] = data >> 8;
-    mux_adc->data[mux_adc->data_count + 6] = data >> 16;
-    mux_adc->data[mux_adc->data_count + 7] = data >> 24;
-    mux_adc->data_count += SAMPLE_WIDTH;
+    sendf("multiplex_adc_status oid=%c clock=%u duration=%u"
+            " next_sequence=%hu pending=%c",
+            oid, mcu_time, duration, next_sequence, pending);
 }
 
-// Append an error to the measurement buffer
+// Append an entry to the measurement buffer
 static void
-append_error(struct mux_adc *mux_adc, uint_fast32_t error_code)
+append_measurement(struct mux_adc *mux_adc, uint_fast32_t data)
 {
-    append_measurement(mux_adc, TCODE_ERROR, error_code);
+    // raw adc counts
+    mux_adc->data[mux_adc->data_count + 0] = data;
+    mux_adc->data[mux_adc->data_count + 1] = data >> 8;
+    mux_adc->data[mux_adc->data_count + 2] = data >> 16;
+    mux_adc->data[mux_adc->data_count + 3] = data >> 24;
+    mux_adc->data_count += SAMPLE_WIDTH;
 }
 
 // Add a measurement to the buffer
 static void
-add_adc_data(struct mux_adc *mux_adc, uint32_t sample_time)
+add_adc_data(struct mux_adc *mux_adc)
 {
-    uint32_t tdiff = mux_adc->sample.measurement_time - sample_time;
-    if (mux_adc->time_shift) {
-        tdiff = (tdiff + (1<<(mux_adc->time_shift - 1))) >> mux_adc->time_shift;
-    }
-
-    // if the time difference between when the sample was requested and 
-    // when it was taken exceeds 0xFF its unusable
-
-    if (tdiff >= TCODE_ERROR) {
-        append_error(mux_adc, SE_SCHEDULE);
-        return;
-    }
-
     // endstop is optional, report if enabled
     if (mux_adc->load_cell_endstop) {
         load_cell_endstop_report_sample(mux_adc->load_cell_endstop
@@ -135,49 +100,40 @@ add_adc_data(struct mux_adc *mux_adc, uint32_t sample_time)
                         , mux_adc->sample.measurement_time);
     }
 
-    append_measurement(mux_adc, sample_time, mux_adc->sample.counts);
+    append_measurement(mux_adc, mux_adc->sample.counts);
 }
 
 // use the contents of the sample container to report
 static void 
-add_sensor_result(struct mux_adc *mux_adc, uint32_t sample_time) {
-    // publish the results of the read
-    if (mux_adc->sample.timing_error) {
-        append_error(mux_adc, SE_READ_TIME);
-    } else if (mux_adc->sample.crc_error) {
-        append_error(mux_adc, SE_CRC);
-    } else if (mux_adc->sample.sample_not_ready) {
-        // skip appending errors for oversampling, they are expected
-        // append_error(mux_adc, SE_NOT_READY);
-    } else {
-        add_adc_data(mux_adc, sample_time);
+add_sensor_result(struct mux_adc *mux_adc) {
+    if (mux_adc->sample.sample_not_ready) {
+        return;
     }
+    add_adc_data(mux_adc);
 }
 
 void read_sensor(struct mux_adc *mux_adc) {
     // clear sample container
-    mux_adc->sample.timing_error = 0;
-    mux_adc->sample.crc_error = 0;
     mux_adc->sample.sample_not_ready = 0;
-    mux_adc->sample.measurement_time = 0;
-    mux_adc->sample.counts = 0;
+    // set to saturation point so is nothing is read the value will be an error
+    mux_adc->sample.counts = 0xFFFFFFFF;
 
-    #if CONFIG_HAVE_GPIO_SPI
     // read from the configured sensor
-    if (mux_adc->sensor_type == SENSOR_ADS1263) {
-        struct ads1263_sensor *ads = ads1263_oid_lookup(mux_adc->sensor_oid);
-        ads1263_query(ads, &mux_adc->sample);
-        return;
+    if (CONFIG_HAVE_GPIO_SPI) {
+        if (mux_adc->sensor_type == SENSOR_ADS1263) {
+            struct ads1263_sensor *ads = ads1263_oid_lookup(mux_adc->sensor_oid);
+            ads1263_query(ads, &mux_adc->sample);
+            return;
+        }
     }
-    #endif
     
-    #if CONFIG_HAVE_GPIO_BITBANGING
-    if (mux_adc->sensor_type == SENSOR_HX71X) {
-        struct hx71x_sensor *hx = hx71x_oid_lookup(mux_adc->sensor_oid);
-        hx71x_query(hx, &mux_adc->sample);
-        return;
+    if (CONFIG_HAVE_GPIO_BITBANGING) {
+        if (mux_adc->sensor_type == SENSOR_HX71X) {
+            struct hx71x_sensor *hx = hx71x_oid_lookup(mux_adc->sensor_oid);
+            hx71x_query(hx, &mux_adc->sample);
+            return;
+        }
     }
-    #endif
 }
 
 // Send load_cell_data message if buffer is full
@@ -229,16 +185,34 @@ command_query_multiplex_adc(uint32_t *args)
     }
     // Start new measurements query
     mux_adc->timer.waketime = args[1];
-    mux_adc->sample_interval_ticks = args[2];
     mux_adc->rest_ticks = args[2];
-    mux_adc->time_shift = args[3];
     mux_adc->sequence = 0;
     mux_adc->data_count = 0;
-
     sched_add_timer(&mux_adc->timer);
 }
 DECL_COMMAND(command_query_multiplex_adc,
-             "query_multiplex_adc oid=%c clock=%u rest_ticks=%u time_shift=%c");
+             "query_multiplex_adc oid=%c clock=%u rest_ticks=%u");
+
+// report clock and queue status for clock sync
+void
+command_query_multiplex_adc_status(uint32_t *args)
+{
+    uint8_t oid = args[0];
+    struct mux_adc *mux_adc = oid_lookup(oid, command_config_multiplex_adc);
+    uint32_t mcu_time = timer_read_time();
+    // move any pending measurement on sensor to queue so it is counted
+    read_sensor(mux_adc);
+    add_sensor_result(mux_adc);
+    uint8_t pending = mux_adc->data_count / SAMPLE_WIDTH;
+    uint32_t duration = mcu_time - timer_read_time();
+    uint16_t next_sequence = mux_adc->sequence;
+    // send back timing data
+    send_mux_adc_status(oid, mcu_time, duration, next_sequence, pending);
+    // send queue contents if full
+    flush_if_full(mux_adc, oid);
+}
+DECL_COMMAND(command_query_multiplex_adc_status,
+             "query_multiplex_adc_status oid=%c");
 
 // Background task that performs measurements
 void
@@ -252,21 +226,10 @@ multiplex_adc_capture_task(void)
         uint_fast8_t flags = mux_adc->flags;
         if (!(flags & FLAG_PENDING))
             continue;
-        irq_disable();
-        uint32_t sample_time = mux_adc->timer.waketime;
-        uint_fast8_t overflow = mux_adc->overflow;
         mux_adc->flags = 0;
-        mux_adc->overflow = 0;
-        irq_enable();
-        sample_time -= mux_adc->rest_ticks;
-        while (overflow--) {
-            append_error(mux_adc, SE_OVERFLOW);
-            flush_if_full(mux_adc, oid);
-        }
         read_sensor(mux_adc);
-        add_sensor_result(mux_adc, sample_time);
+        add_sensor_result(mux_adc);
         flush_if_full(mux_adc, oid);
-        mux_adc->rest_ticks = mux_adc->sample_interval_ticks;
     }
 }
 DECL_TASK(multiplex_adc_capture_task);

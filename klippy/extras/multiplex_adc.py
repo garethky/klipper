@@ -5,7 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import binascii
 import logging, math, threading, logging, struct, collections
-from . import motion_report
+from . import motion_report, adxl345
 
 #
 # Types
@@ -62,141 +62,210 @@ class WebRequestShim:
         # internal clients don't need templates
         return {}
 
+# This is a wrapper for ClockSyncRegression that also manages tracking 16bit
+# sequence counters and generating times for messages
+class MessageSequence:
+    def __init__(self, mcu, messages_per_sequence_count):
+        self.mcu = mcu
+        self.messages_per_sequence_count = messages_per_sequence_count
+        # the sequence count of the last delivered message
+        self.msg_sequence = 0
+        # the sequence count of the last clock sync
+        self.clock_sync_sequence = 0
+        # TODO: what is 640 and why is it good?
+        self.clock_sync = adxl345.ClockSyncRegression(mcu, 640)
+    def reset(self, print_time):
+        self.sequence = 0
+        self.clock_sync_sequence = 0
+        self.clock_sync.reset(print_time, 0)
+    # convert from a sequence number to 
+    def _to_message_count(self, count, i):
+        return (count * self.messages_per_sequence_count) + i
+    def _update_sequence(self, count, count16):
+        # This clears the bottom 16 bits of sequence_base and puts the
+        # 16 bits of count16 there
+        sequence_count = (count & ~0xffff) | count16
+        # detect overflow and increment
+        if sequence_count < count:
+            sequence_count += 0x10000
+        return sequence_count
+    # When the chip reports time & pending messages
+    def updateRegression(self, mcu_clock_32, next_sequence
+                         , pending_message_count):
+        mcu_clock = self.mcu.clock32_to_clock64(mcu_clock_32)
+        self.clock_sync_sequence = \
+            self._update_sequence(self.clock_sync_sequence, next_sequence)
+        msg_count = self._to_message_count(self.clock_sync_sequence
+                                           , pending_message_count)
+        self.clock_sync.update(mcu_clock, msg_count)
+    # When chip sends messages & sequence counter
+    # returns array of predicted message times
+    def messages(self, sequence_count):
+        self.msg_sequence = self._update_sequence(self.msg_sequence,
+                                               sequence_count)
+        # update message count (Note: chip_clock is sequence_count)
+        msg_count = self._to_message_count(self.msg_sequence, 0)
+        self.clock_sync.set_last_chip_clock(msg_count)
+        # calculate the time for each message
+        time_base, message_count_base, msg_interval = \
+            self.clock_sync.get_time_translation()
+        if (msg_count != message_count_base):
+            logging.error("ClockSyncRegression lies! %s %s" % (msg_count, message_count_base))
+        out = []
+        for i in range(self.messages_per_sequence_count):
+            print_time = time_base + ((message_count_base + i) * msg_interval)
+            out.append(print_time)
+        return out
+    def get_status(self):
+        time_base, sequence_base, msg_interval = \
+            self.clock_sync.get_time_translation()
+        sps = round(1.0 / msg_interval, 1)
+        return {
+            'sample_interval': msg_interval,
+            'measured_sps': sps,
+            'sample_count': sequence_base,
+            'start_time': time_base 
+        }
+
 #
 # Constants
 # 
 MIN_MSG_TIME = 0.100
 UPDATE_INTERVAL = .5  # update printer object at 2Hz
-TIME_CODE_ERROR = 0x000000ff
-SAMPLES_PER_TRANSMISSION = 9
+SAMPLES_PER_SEQUENCE = 12
+DEFAULT_STATUS_DURATION = .000005
+#TIME_CODE_ERROR = 0x000000ff
 # Sample error types
-ERROR_OVERFLOW = 0
-ERROR_SCHEDULE = 1
-ERROR_READ_TIME = 2
-ERROR_CRC = 3
-ERROR_SAMPLE_NOT_READY = 4
+#ERROR_OVERFLOW = 1
+#ERROR_SCHEDULE = 2
+#ERROR_READ_TIME = 3
+#ERROR_CRC = 4
+#ERROR_SAMPLE_NOT_READY = 5
 
 class MultiplexAdcCaptureHelper:
     def __init__(self, printer, oid, mcu):
         self.printer = printer
         self.oid = oid
         self.mcu = mcu
-        self.lock = threading.Lock()
-        self.last_sequence = 0
+        self.start_clock = 0
+        self.message_seq = MessageSequence(mcu, SAMPLES_PER_SEQUENCE)
+        self.default_query_duration = \
+            self.mcu.seconds_to_clock(DEFAULT_STATUS_DURATION)
+        self.max_query_duration = self.default_query_duration
         # Capture message storage (accessed from background thread)
         self.capture_buffer = collections.deque([], None)
-         # Measurement conversion
-        self.start_clock = 0
-        self.time_shift = 0
-        self.sample_ticks = 0
-        self.last_sequence = 0
-        self.last_angle = 0
-        self.last_chip_mcu_clock = 0
-        self.last_chip_clock = 0
-        self.static_delay = 0
+        # Measurement conversion
         self._unpack_int32_from = struct.Struct('<i').unpack_from
-        self._unpack_uint32_from = struct.Struct('<I').unpack_from
-        freq = mcu.seconds_to_clock(1.)
-        while (float(TIME_CODE_ERROR << self.time_shift) / freq) < 0.002:
-            self.time_shift += 1
+        # command setup
         mcu.register_response(self._add_samples, "multiplex_adc_data", oid)
-        query = "query_multiplex_adc oid=%c clock=%u rest_ticks=%u" \
-                " time_shift=%c"
+        query = "query_multiplex_adc oid=%c clock=%u rest_ticks=%u"
         query_end = "multiplex_adc_end oid=%c sequence=%hu"
+        status = "query_multiplex_adc_status oid=%c"
+        status_response = "multiplex_adc_status oid=%c clock=%u duration=%u" \
+            " next_sequence=%hu pending=%c"
         self.query_load_cell_cmd = self.mcu.lookup_command(query)
         self.query_load_cell_end_cmd = self.mcu.lookup_query_command(
             query, query_end, oid=oid)
+        self.status_cmd = self.mcu.lookup_query_command(status
+            , status_response, oid=self.oid)
     def _add_samples(self, new_capture):
         #deque is thread safe, no locking is required
         self.capture_buffer.append(new_capture)
-    def reset(self):
-        self.capture_buffer.clear()
-        self.last_sequence = 0
-        self.start_clock = 0
-    def start_capture(self, sample_ticks):
-        self.reset()
+    def now(self):
         systime = self.printer.get_reactor().monotonic()
         print_time = self.mcu.estimated_print_time(systime) + MIN_MSG_TIME
-        self.start_clock = reqclock = self.mcu.print_time_to_clock(print_time)
-        self.sample_ticks = sample_ticks
-        self.query_load_cell_cmd.send([self.oid, reqclock, sample_ticks,
-                                       self.time_shift], reqclock=reqclock)
+        return self.mcu.print_time_to_clock(print_time)
+    def reset(self):
+        self.start_clock = 0
+        self.capture_buffer.clear()
+    def start_capture(self, rest_ticks):
+        self.reset()
+        self.start_clock = reqclock = self.now()
+        self.message_seq.reset(reqclock)
+        self.sample_ticks = rest_ticks
+        self.query_load_cell_cmd.send([self.oid, reqclock, rest_ticks,
+                                       0], reqclock=reqclock)
+        self.update_clock(force=True)
     def stop_capture(self):
         self.query_load_cell_end_cmd.send([self.oid, 0, 0, 0])
         self.reset()
     def is_capturing(self):
         return self.start_clock != 0
-    def _process_error(self, error, record_clock):
-        sample = None
-        if error == ERROR_OVERFLOW:
-            sample = ("error", record_clock, "ERROR_OVERFLOW")
-        elif error == ERROR_SAMPLE_NOT_READY:
-            sample = ("error", record_clock, "ERROR_SAMPLE_NOT_READY")
-        elif error == ERROR_CRC:
-            sample = ("error", record_clock, "ERROR_CRC")
-        elif error == ERROR_READ_TIME:
-            sample = ("error", record_clock, "ERROR_READ_TIME")
-        else:
-            sample = ("error", record_clock, "ERROR_UNKNOWN")
-        #TODO: maybe dont log 
-        logging.error("MultiplexADC returned an ERROR: %s print_time: %s" \
-                      % (sample[2], record_clock))
-        return sample
+    def get_status(self):
+        status = self.message_seq.get_status()
+        status.update({'is_capturing': self.is_capturing()})
+        return status
+#
+#    def _process_error(self, error, record_clock):
+#        sample = None
+#        if error == ERROR_OVERFLOW:
+#            sample = ("error", record_clock, "ERROR_OVERFLOW")
+#        elif error == ERROR_SAMPLE_NOT_READY:
+#            sample = ("error", record_clock, "ERROR_SAMPLE_NOT_READY")
+#        elif error == ERROR_CRC:
+#            sample = ("error", record_clock, "ERROR_CRC")
+#        elif error == ERROR_READ_TIME:
+#            sample = ("error", record_clock, "ERROR_READ_TIME")
+#        else:
+#            sample = ("error", record_clock, "ERROR_UNKNOWN")
+#        #TODO: maybe dont log 
+#        logging.error("MultiplexADC returned an ERROR: %s print_time: %s" \
+#                      % (sample[2], record_clock))
+#        return sample
     def flush(self):
+        self.update_clock()
         # local variables to optimize inner loop below
         capture_buffer = self.capture_buffer
-        #static_delay = self.static_delay
-        #sample_ticks = self.sample_ticks
-        #start_clock = self.start_clock
-        #time_shift = self.time_shift
-        clock_to_print_time = self.mcu.clock_to_print_time
-        clock32_to_clock64 = self.mcu.clock32_to_clock64
         unpack_int32_from = self._unpack_int32_from
-        unpack_uint32_from = self._unpack_uint32_from 
-        last_sequence = self.last_sequence
+        message_seq = self.message_seq
         # Process every message in capture_buffer
-        num_samples = len(capture_buffer)
-        samples = collections.deque([], num_samples * SAMPLES_PER_TRANSMISSION) #[None] * ()
-        for k in range(num_samples):
+        num_messages = len(capture_buffer)
+        samples = []
+        for message_index in range(num_messages):
+            # thread safe removal of 1 message from dequeue
             params = capture_buffer.popleft()
-            # This clears the bottom 16 bits of last_sequence and puts the 16 bits of params['sequence'] there
-            seq = (last_sequence & ~0xffff) | params['sequence']
-            # detect the 16 bit sequence number wrapping back to 0 and increment the 17+ bits by 1
-            if seq < last_sequence:
-                seq += 0x10000
-            last_sequence = seq
-            # Each data frame that comes from the sensor has SAMPLES_PER_TRANSMISSION samples inside it
-            #msg_mclock = start_clock + (seq * SAMPLES_PER_TRANSMISSION * sample_ticks)
+            sequence = params['sequence']
             # the call to bytearray is only required for python2
-            d = bytearray(params['data'])
-            data_len = len(d)
-            #record_clock = msg_mclock
-            i = 0
+            data = bytearray(params['data'])
+            data_len = len(data)
+            # each sample is 5 bytes, so the number of samples is
+            sample_count = data_len / 5
+            sample_times = message_seq.messages(sequence)
             try:
-                while i < data_len:
-                    #record_clock += sample_ticks
-                    #time_diff = d[i]
-                    tcode = unpack_uint32_from(d, offset=i)[0]
-                    i += 4
-                    sample = unpack_int32_from(d, offset=i)[0]
-                    i += 4
-                    if tcode == TIME_CODE_ERROR:
-                        samples.append(self._process_error(sample, 0.))
-                    else:
-                        sample_print_time = clock_to_print_time(clock32_to_clock64(tcode))
-                        # timestamp is record_clock + offset shifted by time_shift
-                        # sample_clock = record_clock + time_diff
-                        samples.append(["sample",
-                                        sample_print_time,
+                byte_index = 0
+                for sample_index in range(sample_count):
+                    sample = unpack_int32_from(data, offset=byte_index)[0]
+                    byte_index += 4
+                    # TODO: the sample vs error distinction is now meaningless
+                    # remove the static header field
+                    # also whats that 0 for?
+                    samples.append(["sample", sample_times[sample_index],
                                         sample, 0])
             except Exception:
                 logging.exception("Load Cell Samples threw an exception: " \
-                    "%s (%i) i: %i" % (binascii.hexlify(d), data_len, i))
+                    "%s (%i) i: %i" % \
+                    (binascii.hexlify(data), data_len, byte_index))
         # Debug
         #logging.debug("multiplex_adc precessed samples: " /
         #   "%i, %i" % (count, len(samples)))
-        self.last_sequence = last_sequence
         return list(samples)
+    def update_clock(self, force=False, minclock=0):
+        # Query current state
+        params = self.status_cmd.send([self.oid], minclock=minclock)
+        mcu_clock = self.mcu.clock32_to_clock64(params['clock'])
+        duration = params['duration']
+        # check for long duration reads
+        if not force and duration > self.max_query_duration:
+            # Skip measurement as a high query time could skew clock tracking
+            self.max_query_duration = max(2 * self.max_query_duration,
+                                          self.default_query_duration)
+            logging.error("update_clock duration too long")
+            #TODO: this might need to be an error:
+            # There is no check if this happens multiple times or permanently
+            return
+        self.max_query_duration = 2 * duration
+        self.message_seq.updateRegression(mcu_clock, \
+            params['next_sequence'], params['pending'])
 
 # Printer class that forms the basis of Multiplex ADC functionality
 class MultiplexAdcSensorWrapper():
@@ -223,7 +292,7 @@ class MultiplexAdcSensorWrapper():
             % (self.mux_adc_oid, self.sensor.get_mux_adc_sensor_type()
                , self.sensor.get_oid(), self.load_cell_endstop_oid))
         mcu.add_config_cmd(
-            "query_multiplex_adc oid=%d clock=0 rest_ticks=0 time_shift=0"
+            "query_multiplex_adc oid=%d clock=0 rest_ticks=0"
             % (self.mux_adc_oid,), on_restart=True)
         self.samples = MultiplexAdcCaptureHelper(self.printer
                                                  , self.mux_adc_oid, self.mcu)
@@ -251,16 +320,16 @@ class MultiplexAdcSensorWrapper():
         return self.sensor.get_samples_per_second()
     def get_clock_ticks_per_sample(self):
         sample_period = 1. / float(self.get_samples_per_second())
-        #sample_period = 1. / 40000.0  # 40Khz
         return self.mcu.seconds_to_clock(sample_period)
     def start_capture(self):
         if self.is_capturing():
             return False
         logging.debug("Starting multiplex_adc '%s' capture", self.name)
         self.sensor.start_capture()
-        sample_period = 1. / 40000.0  # 40Khz
-        sample_ticks = self.mcu.seconds_to_clock(sample_period)
-        self.samples.start_capture(sample_ticks)
+        # sample at a faster rate than the sensor sample time
+        rest_time = (0.7 / self.get_samples_per_second())
+        rest_ticks = self.mcu.seconds_to_clock(rest_time)
+        self.samples.start_capture(rest_ticks)
         logging.debug("Stared multiplex_adc '%s' capture", self.name)
         return True
     def stop_capture(self):
@@ -275,8 +344,8 @@ class MultiplexAdcSensorWrapper():
         return self.mcu
     def get_status(self, eventtime):
         sensor_status = self.sensor.get_status(eventtime)
-        sensor_status.update({'is_capturing': self.is_capturing()
-                , 'sps': self.sensor.get_samples_per_second()})
+        capture_status = self.samples.get_status()
+        sensor_status.update(capture_status)
         return sensor_status
     def subscribe(self, callback):
         client = EventDumpClient(callback)
