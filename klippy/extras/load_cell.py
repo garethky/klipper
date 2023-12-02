@@ -331,7 +331,7 @@ class LoadCell:
             printer.add_object('load_cell_endstop:' + name
                         , self.load_cell_endstop)
             sensor.attach_load_cell_endstop(self.load_cell_endstop.get_oid())
-            printer.add_object('load_cell_probe:' + name
+            printer.add_object('probe'
                         , probe.PrinterProbe(config, self.load_cell_endstop))
         # sensor must implement LoadCellDataSource
         self.tare_counts = None
@@ -354,6 +354,8 @@ class LoadCell:
             return
         samples = []
         for row in data["params"]["samples"]:
+            if row is None:
+                continue            
             if row[0] == 'sample':
                 # [time, grams, counts]
                 samples.append([row[1],
