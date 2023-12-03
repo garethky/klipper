@@ -18,23 +18,23 @@ class CollisionAnalyzer:
         self._end_index = len(samples) -1
         self._analyze()
     def _analyze(self):
-        start_time = time.time()
+        #start_time = time.time()
         # trim to interesting samples
         self.trim_to_probing()
         # select elbow
-        self._elbow_index = self.select_elbow_point(self._start_index,
-                                                    self._end_index)
-        end_time = time.time()
-        elapsed = end_time - start_time
+        #self._elbow_index = self.select_elbow_point(self._start_index,
+        #                                            self._end_index)
+        #end_time = time.time()
+        #elapsed = end_time - start_time
         #logging.info("start_index: %s, elbow index, %s, end_index: %s. Time taken: %ss"
         #             % (self._start_index, self._elbow_index, self._end_index, elapsed))
-        self._collision_force = 0
-        self._collision_time = self.calculate_collision(
-            self._start_index, self._elbow_index, self._end_index)
+        #self._collision_force = 0
+        #self._collision_time = self.calculate_collision(
+        #    self._start_index, self._elbow_index, self._end_index)
         #self._collision_time = self.calculate_dumb_collision(
         #    self._start_index, self._elbow_index, self._end_index)
-        end_time = time.time()
-        elapsed = end_time - start_time
+        #end_time = time.time()
+        #elapsed = end_time - start_time
         #logging.info("collision force: %s, collision time, %s.  Time taken: %ss"
         #             % (self._collision_force, self._collision_time, elapsed))
     def trim_to_probing(self):
@@ -148,12 +148,6 @@ class CollisionAnalyzer:
             })
         return {
             "series": series,
-            #"pre_collision_line": self._pre_collision_line,
-            #"post_collision_line": self._post_collision_line,
-            "collision_point": [{"time": self._collision_time,
-                                 "force": self._collision_force}],
-            "elbow_point": [{"time": self._time[self._elbow_index],
-                             "force": self._force[self._elbow_index]}],
             "trigger_point": [{"time": self._trigger_time,
                              "force": self._force[self._end_index - 2]}],
             "end_point": [{"time": self._time[self._end_index],
