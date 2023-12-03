@@ -103,8 +103,8 @@ class LoadCellCommandHelper:
         collector = self.load_cell.get_collector()
         samples = collector.collect_samples(sps * 10)
         counts = np.asarray(samples)[:, 2].astype(int)
-        errors = bin_errors(collector.get_errors())
-        total_errors = sum(errors.values())
+        #errors = bin_errors(collector.get_errors())
+        #total_errors = sum(errors.values())
         min, max = self.load_cell.saturation_range()
         good_count = 0
         saturation_count = 0
@@ -124,9 +124,9 @@ class LoadCellCommandHelper:
                           % (min_pct, max_pct))
         gcmd.respond_info("Sample range / sensor capacity: %.5f%%"
                           % ((max_pct - min_pct) / 2.))
-        gcmd.respond_info("Errors: %i" % (total_errors))
-        if (total_errors > 0):
-            gcmd.respond_info("Error breakdown: %s" % errors)
+        #gcmd.respond_info("Errors: %i" % (total_errors))
+        #if (total_errors > 0):
+        #    gcmd.respond_info("Error breakdown: %s" % errors)
 
 class LoadCellGuidedCalibrationHelper:
     def __init__(self, printer, load_cell):
@@ -249,15 +249,7 @@ class LoadCellSampleCollector():
         self._errors = collections.deque()
         self._client = None
     def _on_samples(self, data):
-        # filter non "samples" type messages
-        if not data.get("params", {}).get("samples"):
-            return
-        samples = data["params"]["samples"]
-        for sample in samples:
-            if 'error' == sample[0]:
-                self._errors.append(sample)
-            else:
-                self._samples.append(sample)
+        self._samples.extend(data["params"]['samples'])
     def start_collecting(self):
         self.stop_collecting()
         self._samples.clear()
@@ -269,8 +261,8 @@ class LoadCellSampleCollector():
             self._client = None
     def get_samples(self):
         return copy.copy(self._samples)
-    def get_errors(self):
-        return copy.copy(self._errors)
+    #def get_errors(self):
+    #    return copy.copy(self._errors)
     def is_collecting(self):
         return self._client is not None
     # return true when the last sample has a time after the target time
@@ -325,7 +317,6 @@ class LoadCell:
         self.configfile = self.printer.lookup_object('configfile')
         self.load_cell_endstop = None
         if config.getboolean('is_probe', default=False):
-            logging.info("DEBUG: " + name)
             self.load_cell_endstop = \
                 load_cell_endstop.LoadCellEndstop(config, self)
             printer.add_object('load_cell_endstop:' + name
@@ -354,15 +345,10 @@ class LoadCell:
             return
         samples = []
         for row in data["params"]["samples"]:
-            if row is None:
-                continue            
-            if row[0] == 'sample':
-                # [time, grams, counts]
-                samples.append([row[1],
-                                self.counts_to_grams(row[2]),
-                                row[2]])
-            else:
-                samples.append(row)
+            # [time, grams, counts]
+            samples.append([row[0],
+                            self.counts_to_grams(row[1]),
+                            row[1]])
         self.api_dump.send({'samples': samples})
     def send_endstop_event(self, endstop_data):
         self.api_dump.send({'endstop': endstop_data})
@@ -407,10 +393,6 @@ class LoadCell:
         if num_samples is None:
             num_samples = self.sensor.get_samples_per_second()
         samples = self.get_collector().collect_samples(num_samples)
-        errors = self.get_collector().get_errors()
-        # check samples for errors or timeouts while reading
-        if len(errors) > 0:
-            raise SampleException("Load cell could not be read reliably")
         # check samples for saturated readings
         min, max = self.saturation_range()
         for sample in samples:

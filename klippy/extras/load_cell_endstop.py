@@ -324,7 +324,7 @@ class LoadCellEndstop:
                     pullback_end_time,
                     self.last_trigger_time)
         self._load_cell.send_endstop_event(analyzer.get_endstop_event())
-        analyzer.get_collision_time()
+        #analyzer.get_collision_time()
         with open('/home/pi/printer_data/logs/loadcell.log', 'a') as log:
             log.write("\"home_end_time\": %s," % (self.home_end_time))
             log.write("\"pullback_end_time\": %s," % (pullback_end_time))

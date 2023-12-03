@@ -67,16 +67,6 @@ mux_adc_report(struct mux_adc *mux_adc, uint8_t oid)
     mux_adc->sequence++;
 }
 
-// Report local measurement buffer
-static void
-send_mux_adc_status(uint8_t oid, uint32_t mcu_time, uint32_t duration
-                    , uint16_t next_sequence, uint8_t pending)
-{
-    sendf("multiplex_adc_status oid=%c clock=%u duration=%u"
-            " next_sequence=%hu pending=%c",
-            oid, mcu_time, duration, next_sequence, pending);
-}
-
 // Append an entry to the measurement buffer
 static void
 append_measurement(struct mux_adc *mux_adc, uint_fast32_t data)
@@ -204,10 +194,12 @@ command_query_multiplex_adc_status(uint32_t *args)
     read_sensor(mux_adc);
     add_sensor_result(mux_adc);
     uint8_t pending = mux_adc->data_count / SAMPLE_WIDTH;
-    uint32_t duration = mcu_time - timer_read_time();
+    uint32_t duration = timer_read_time() - mcu_time;
     uint16_t next_sequence = mux_adc->sequence;
     // send back timing data
-    send_mux_adc_status(oid, mcu_time, duration, next_sequence, pending);
+    sendf("multiplex_adc_status oid=%c clock=%u duration=%u"
+        " next_sequence=%hu pending=%c",
+        oid, mcu_time, duration, next_sequence, pending);
     // send queue contents if full
     flush_if_full(mux_adc, oid);
 }
