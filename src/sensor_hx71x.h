@@ -10,6 +10,7 @@ struct hx71x_sensor {
     uint8_t gain_channel;   // the gain+channel selection (1-4)
 };
 struct hx71x_sensor *hx71x_oid_lookup(uint8_t oid);
+int8_t hx71x_is_ready(struct hx71x_sensor *hx71x);
 void hx71x_query(struct hx71x_sensor *hx71x_sensor
                             , struct mux_adc_sample *sample);
 

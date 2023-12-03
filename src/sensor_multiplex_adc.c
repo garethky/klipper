@@ -102,7 +102,27 @@ add_sensor_result(struct mux_adc *mux_adc) {
     add_adc_data(mux_adc);
 }
 
-void read_sensor(struct mux_adc *mux_adc) {
+uint8_t
+is_sensor_ready(struct mux_adc *mux_adc) {
+    // read from the configured sensor
+    if (CONFIG_HAVE_GPIO_SPI) {
+        if (mux_adc->sensor_type == SENSOR_ADS1263) {
+            return ads1263_is_ready(ads1263_oid_lookup(mux_adc->sensor_oid));
+        }
+    }
+    
+    if (CONFIG_HAVE_GPIO_BITBANGING) {
+        if (mux_adc->sensor_type == SENSOR_HX71X) {
+            return hx71x_is_ready(hx71x_oid_lookup(mux_adc->sensor_oid));
+        }
+    }
+
+    shutdown("No sensor found");
+    return 0;
+}
+
+void
+read_sensor(struct mux_adc *mux_adc) {
     // clear sample container
     mux_adc->sample.sample_not_ready = 0;
     // set to saturation point so is nothing is read the value will be an error
@@ -111,7 +131,8 @@ void read_sensor(struct mux_adc *mux_adc) {
     // read from the configured sensor
     if (CONFIG_HAVE_GPIO_SPI) {
         if (mux_adc->sensor_type == SENSOR_ADS1263) {
-            struct ads1263_sensor *ads = ads1263_oid_lookup(mux_adc->sensor_oid);
+            struct ads1263_sensor *ads = 
+                    ads1263_oid_lookup(mux_adc->sensor_oid);
             ads1263_query(ads, &mux_adc->sample);
             return;
         }
@@ -124,6 +145,8 @@ void read_sensor(struct mux_adc *mux_adc) {
             return;
         }
     }
+
+    shutdown("No sensor found");
 }
 
 // Send load_cell_data message if buffer is full
@@ -189,19 +212,17 @@ command_query_multiplex_adc_status(uint32_t *args)
 {
     uint8_t oid = args[0];
     struct mux_adc *mux_adc = oid_lookup(oid, command_config_multiplex_adc);
+    irq_disable();
     uint32_t mcu_time = timer_read_time();
-    // move any pending measurement on sensor to queue so it is counted
-    read_sensor(mux_adc);
-    add_sensor_result(mux_adc);
-    uint8_t pending = mux_adc->data_count / SAMPLE_WIDTH;
-    uint32_t duration = timer_read_time() - mcu_time;
+    uint8_t is_ready = is_sensor_ready(mux_adc);
+    irq_enable();
     uint16_t next_sequence = mux_adc->sequence;
+    uint8_t pending = mux_adc->data_count / SAMPLE_WIDTH;
+    pending += is_ready ? 1 : 0;
+
     // send back timing data
-    sendf("multiplex_adc_status oid=%c clock=%u duration=%u"
-        " next_sequence=%hu pending=%c",
-        oid, mcu_time, duration, next_sequence, pending);
-    // send queue contents if full
-    flush_if_full(mux_adc, oid);
+    sendf("multiplex_adc_status oid=%c clock=%u next_sequence=%hu pending=%c",
+        oid, mcu_time, next_sequence, pending);
 }
 DECL_COMMAND(command_query_multiplex_adc_status,
              "query_multiplex_adc_status oid=%c");

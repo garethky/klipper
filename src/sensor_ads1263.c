@@ -15,10 +15,15 @@
 
 #define MAX_SPI_READ_TIME timer_from_us(50)
 
+uint8_t
+ads1263_is_ready(struct ads1263_sensor *ads) {
+    // if the pin is low the sample is ready
+    return !gpio_in_read(ads->drdy);
+}
+
 // ads1263 sensor query
 void
-ads1263_query(struct ads1263_sensor *ads, struct mux_adc_sample *sample)
-{
+ads1263_query(struct ads1263_sensor *ads, struct mux_adc_sample *sample) {
     // if the pin is high the sample is not ready
     if (gpio_in_read(ads->drdy)) {
         sample->sample_not_ready = 1;

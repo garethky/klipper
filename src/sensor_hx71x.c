@@ -78,6 +78,12 @@ hx71x_delay(hx71x_time_t start, hx71x_time_t ticks)
 #define MIN_PULSE_TIME  nsecs_to_ticks(200)
 #define MAX_READ_TIME timer_from_us(50)
 
+int8_t
+hx71x_is_ready(struct hx71x_sensor *hx71x) {
+    // if the pin is low the sample is ready
+    return gpio_in_read(hx71x->dout) == 0;
+}
+
 // xh71x ADC query
 void
 hx71x_query(struct hx71x_sensor *hx71x, struct mux_adc_sample *sample)

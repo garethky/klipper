@@ -61,54 +61,6 @@ class WebRequestShim:
     def get_dict(self, template_key, map):
         # internal clients don't need templates
         return {}
-    
-class DelayFilter:
-    def __init__(self, minimum_delay, bypass_count):
-        self.minimum_delay = minimum_delay
-        self.bypass_count = bypass_count
-        self.remaining_bypass = bypass_count
-        self.max_delay = minimum_delay
-        # track how many sequential messages are filtered
-        self.recurring_filter_count = 0
-        self.max_recurring_filter_count = 0
-        self.filtered_count = 0
-        self.total = 0
-    def reset(self):
-        self.remaining_bypass = self.bypass_count
-        self.delay = self.minimum_delay
-        self.filtered_count = 0
-        self.recurring_filter_count = 0
-        self.max_recurring_filter_count = 0
-        self.total = 0
-    def is_filtered(self, delay):
-        self.total += 1
-        if (self.remaining_bypass > 0):
-            self.remaining_bypass -= 1
-            return False
-        # Check for acceptable delay
-        if delay <= self.max_delay:
-            # allow for delay to shrink as performance improves
-            self.max_delay = 2 * delay
-            self.recurring_filter_count = 0
-            return False
-        # Message filtered, accept 2x more delay on the next attempt
-        self.max_delay = max(2 * self.max_delay, self.minimum_delay)
-        self.filtered_count += 1
-        self.recurring_filter_count += 1
-        self.max_recurring_filter_count = max(self.max_recurring_filter_count
-                                            , self.recurring_filter_count)
-        # TODO: consider an exception if maxRecurringFilterCount > 10
-        return True
-    def get_status(self):
-        filtered_percent = float(self.filtered_count) / float(self.total)
-        filtered_percent = round(100.0 * filtered_percent, 1)
-        return {
-            'max_delay_ticks': self.max_delay,
-            'filtered_count': self.filtered_count,
-            'filtered_percent': filtered_percent,
-            'recurring_filter_count': self.recurring_filter_count,
-            'max_recurring_filter_count': self.max_recurring_filter_count,
-        }
 
 # This is a wrapper for ClockSyncRegression that also manages tracking 16bit
 # sequence counters and generating times for messages
@@ -186,8 +138,6 @@ class MultiplexAdcCaptureHelper:
         self.mcu = mcu
         self.start_clock = 0
         self.message_seq = MessageSequence(mcu, SAMPLES_PER_MESSAGE)
-        min_delay = self.mcu.seconds_to_clock(DEFAULT_STATUS_DURATION)
-        self.delay_filter = DelayFilter(min_delay, 2)
         # Capture message storage (accessed from background thread)
         self.capture_buffer = collections.deque([], None)
         # Measurement conversion
@@ -197,7 +147,7 @@ class MultiplexAdcCaptureHelper:
         query = "query_multiplex_adc oid=%c clock=%u rest_ticks=%u"
         query_end = "multiplex_adc_end oid=%c sequence=%hu"
         status = "query_multiplex_adc_status oid=%c"
-        status_response = "multiplex_adc_status oid=%c clock=%u duration=%u" \
+        status_response = "multiplex_adc_status oid=%c clock=%u" \
             " next_sequence=%hu pending=%c"
         self.query_load_cell_cmd = self.mcu.lookup_command(query)
         self.query_load_cell_end_cmd = self.mcu.lookup_query_command(
@@ -214,7 +164,6 @@ class MultiplexAdcCaptureHelper:
     def reset(self):
         self.start_clock = 0
         self.capture_buffer.clear()
-        self.delay_filter.reset()
     def start_capture(self, rest_ticks):
         self.reset()
         self.start_clock = reqclock = self.now()
@@ -230,9 +179,7 @@ class MultiplexAdcCaptureHelper:
         return self.start_clock != 0
     def get_status(self):
         status = self.message_seq.get_status()
-        status.update({'is_capturing': self.is_capturing(),
-                       'delay_filter': self.delay_filter.get_status()})
-        status.update({})
+        status.update({'is_capturing': self.is_capturing()})
         return status
     def flush(self):
         self.update_clock()
@@ -267,9 +214,6 @@ class MultiplexAdcCaptureHelper:
     def update_clock(self, minclock=0):
         # Query current state
         params = self.status_cmd.send([self.oid], minclock=minclock)
-        duration = params['duration']
-        if (self.delay_filter.is_filtered(duration)):
-            return # skip messages with unacceptable duration
         mcu_clock = self.mcu.clock32_to_clock64(params['clock'])
         self.message_seq.updateRegression(mcu_clock, \
             params['next_sequence'], params['pending'])
