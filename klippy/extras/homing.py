@@ -128,64 +128,6 @@ class HomingMove:
                                  for s in kin.get_steppers()}
                 haltpos = self.calc_toolhead_pos(halt_kin_spos, over_steps)
         self.toolhead.set_position(haltpos)
-        logging.info("toolhead position homing_halt: %s" % self.toolhead.get_position())
-        # execute optional pullback move
-        # WARNING: This code is a work in progress
-        # detect if the endstop supports pullback and then execute the move
-        do_pullback = False
-        for mcu_endstop, name in self.endstops:
-            if callable(getattr(mcu_endstop.__class__, "pullback_end", None)):
-                do_pullback = True
-        if do_pullback:
-            # not clear to me yet how endstops should map to axes...
-            #for mcu_endstop, name in self.endstops:
-            #    if callable(getattr(mcu_endstop.__class__, "pullback_prepare")):
-            #       distance, speed = mcu_endstop.pullback_prepare(self)
-            #TODO: which axes should the pullback move be made along? Only those axes that showed movement vs the start position
-            #TODO: the pullback distance depends on the axis or probe configuration. Where should this be configured?
-            pullback_pos = [haltpos[0], haltpos[1], haltpos[2] + 0.1, haltpos[3]]
-            #TODO: speed needs to come from the endstop because its related to the endstop's sampling rate
-            speed = 400. * 0.001
-            self.toolhead.manual_move(pullback_pos, speed)
-            self.toolhead.flush_step_generation()
-            pullback_end = self.toolhead.get_last_move_time()
-            for mcu_endstop, name in self.endstops:
-                if callable(getattr(mcu_endstop.__class__, "pullback_end")):
-                    trigger_time = mcu_endstop.pullback_end(pullback_end)
-                    # update the trigger time only for the supported endstops
-                    if trigger_time > 0.:
-                        trigger_times[name] = trigger_time
-            # re-run logic for trigger position
-            # the stepper positions start_pos needs to be updated so the "sp.trig_pos - sp.start_pos" math is correct
-            for sp in self.stepper_positions:
-                tt = trigger_times.get(sp.endstop_name, pullback_end)
-                sp.note_home_end(tt)
-            #position where the pullback move ended
-            halt_kin_spos = {s.get_name(): s.get_commanded_position()
-                for s in kin.get_steppers()}
-            if probe_pos:
-                halt_steps = {sp.stepper_name: sp.halt_pos - sp.start_pos
-                          for sp in self.stepper_positions}
-                haltpos = self.calc_toolhead_pos(kin_spos, trig_steps)
-                # get the delta in steps from the current position
-                trig_steps = {sp.stepper_name: sp.halt_pos - sp.trig_pos # could be - or + because we reversed directions??
-                          for sp in self.stepper_positions}
-                pullback_trigpos = self.calc_toolhead_pos(halt_kin_spos, trig_steps)
-                
-                with open('/home/pi/printer_data/logs/loadcell.log', 'a') as log:
-                    log.write("\"trigger_z\": %s," % (trigpos[2]))
-                    log.write("\"pullback_trigger_z\": %s,}," % (pullback_trigpos[2]))
-                #logging.info("trig_steps: %s" % (trig_steps))
-                #logging.info("haltpos: %s" % (haltpos))
-                #logging.info("trigpos: %s" % (trigpos))
-                #logging.info("halt_kin_spos: %s" % (halt_kin_spos))
-                #logging.info("alt_trigpos: %s" % (alt_trigpos))
-                #logging.info("toolhead position_pullback_end: %s" % self.toolhead.get_position())
-                trigpos = pullback_trigpos
-            else:
-                logging.error("Homing not handled yet")
-                # if homing the position should be updated
-                #self.toolhead.set_position(trigpos)
         # Signal homing/probing move complete
         try:
             self.printer.send_event("homing:homing_move_end", self)

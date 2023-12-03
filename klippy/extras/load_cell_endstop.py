@@ -65,11 +65,11 @@ class CollisionAnalyzer:
         #        self._end_index += 1
         #    else:
         #        break
-        with open('/home/pi/printer_data/logs/loadcell.log', 'a') as log:
-            log.write("{\"time\": %s," % (np.array2string(self._time[self._start_index:self._end_index], separator=',', threshold=50000)))
-            log.write("\"force\": %s," % (np.array2string(self._force[self._start_index:self._end_index], separator=',', threshold=50000)))
-            log.write("\"trigger_index\": %s," % (trigger_index - self._start_index))
-            log.write("\"trigger_time\": %s," % (self._trigger_time))
+        #with open('/home/pi/printer_data/logs/loadcell.log', 'a') as log:
+        #    log.write("{\"time\": %s," % (np.array2string(self._time[self._start_index:self._end_index], separator=',', threshold=50000)))
+        #    log.write("\"force\": %s," % (np.array2string(self._force[self._start_index:self._end_index], separator=',', threshold=50000)))
+        #    log.write("\"trigger_index\": %s," % (trigger_index - self._start_index))
+        #    log.write("\"trigger_time\": %s," % (self._trigger_time))
     # perpendicular distance from point p to line l1, l2
     def _perpendicular_distance(self, l1_x, l1_y, l2_x, l2_y, p_x, p_y):
         import numpy as np
@@ -319,9 +319,9 @@ class LoadCellEndstop:
                     self.last_trigger_time)
         self._load_cell.send_endstop_event(analyzer.get_endstop_event())
         #analyzer.get_collision_time()
-        with open('/home/pi/printer_data/logs/loadcell.log', 'a') as log:
-            log.write("\"home_end_time\": %s," % (self.home_end_time))
-            log.write("\"pullback_end_time\": %s," % (pullback_end_time))
+        #with open('/home/pi/printer_data/logs/loadcell.log', 'a') as log:
+        #    log.write("\"home_end_time\": %s," % (self.home_end_time))
+        #    log.write("\"pullback_end_time\": %s," % (pullback_end_time))
         return pullback_end_time
     def query_endstop(self, print_time):
         clock = self._mcu.print_time_to_clock(print_time)
