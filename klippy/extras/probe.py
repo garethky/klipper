@@ -13,7 +13,7 @@ consider reducing the Z axis minimum position so the probe
 can travel further (the Z minimum position can be negative).
 """
 
-class PrinterProbe:
+class PrinterProbe(object):
     def __init__(self, config, mcu_probe):
         self.printer = config.get_printer()
         self.name = config.get_name()
@@ -113,6 +113,7 @@ class PrinterProbe:
     def get_offsets(self):
         return self.x_offset, self.y_offset, self.z_offset
     def _probe(self, speed):
+        logging.error('PROBE FAILED OVERRIDE')
         toolhead = self.printer.lookup_object('toolhead')
         curtime = self.printer.get_reactor().monotonic()
         if 'z' not in toolhead.get_status(curtime)['homed_axes']:
