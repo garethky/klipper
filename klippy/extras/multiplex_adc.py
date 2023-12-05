@@ -198,7 +198,7 @@ class MultiplexAdcCaptureHelper:
             data = bytearray(params['data'])
             data_len = len(data)
             # each sample is 4 bytes, so the number of samples is
-            sample_count = data_len / SAMPLE_WIDTH
+            sample_count = data_len // SAMPLE_WIDTH
             sample_times = message_seq.messages(sequence)
             try:
                 byte_index = 0
