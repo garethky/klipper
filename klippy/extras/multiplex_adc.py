@@ -65,14 +65,14 @@ class WebRequestShim:
 # This is a wrapper for ClockSyncRegression that also manages tracking 16bit
 # sequence counters and generating times for messages
 class MessageSequence:
-    def __init__(self, mcu, samples_per_message):
+    def __init__(self, mcu, samples_per_message, sps):
         self.mcu = mcu
         self.samples_per_message = samples_per_message
         self.last_sample_time = 0
         # the sequence count of the last clock sync
         self.clock_sync_sequence = 0
-        # TODO: what is 640 and why is it a good value?
-        self.clock_sync = adxl345.ClockSyncRegression(mcu, 640)
+        smooth_time = 2 * (sps * UPDATE_INTERVAL)
+        self.clock_sync = adxl345.ClockSyncRegression(mcu, smooth_time)
     def reset(self, mcu_print_time):
         self.last_sample_time = 0
         self.clock_sync_sequence = 0
@@ -132,12 +132,12 @@ UPDATE_INTERVAL = 0.100  # update printer object at 10Hz
 DEFAULT_STATUS_DURATION = .000005
 
 class MultiplexAdcCaptureHelper:
-    def __init__(self, printer, oid, mcu):
+    def __init__(self, printer, oid, mcu, sps):
         self.printer = printer
         self.oid = oid
         self.mcu = mcu
         self.start_clock = 0
-        self.message_seq = MessageSequence(mcu, SAMPLES_PER_MESSAGE)
+        self.message_seq = MessageSequence(mcu, SAMPLES_PER_MESSAGE, sps)
         # Capture message storage (accessed from background thread)
         self.capture_buffer = collections.deque([], None)
         # Measurement conversion
@@ -246,8 +246,9 @@ class MultiplexAdcSensorWrapper():
         mcu.add_config_cmd(
             "query_multiplex_adc oid=%d clock=0 rest_ticks=0"
             % (self.mux_adc_oid,), on_restart=True)
+        sps = self.get_samples_per_second()
         self.samples = MultiplexAdcCaptureHelper(self.printer
-                                                 , self.mux_adc_oid, self.mcu)
+                                    , self.mux_adc_oid, self.mcu, sps)
     def _api_startstop(self, is_start):
         if is_start:
             self.start_capture()

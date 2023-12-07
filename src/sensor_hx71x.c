@@ -123,6 +123,12 @@ hx71x_query(struct hx71x_sensor *hx71x, struct mux_adc_sample *sample)
         shutdown("HX71x read timing error, read took too long");
     }
 
+    // The dout pin should be high (indicating not ready) after a read
+    // if not the chip may have restarted and we have a desync
+    if (!gpio_in_read(hx71x->dout)) {
+        shutdown("HX71x dout pin low after read, sensor desync or reboot");
+    }
+
     //convert 24 bit signed to 32 bit signed
     sample->counts = (counts >= 0x800000) ? (counts | 0xFF000000) : counts;
 }

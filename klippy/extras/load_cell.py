@@ -92,6 +92,7 @@ def find_kneedle(x, y, additional_width = 0.0):
     y_coords = [y[0], y[-1]]
     return _kneedle(x, y, x_coords, y_coords)
 
+#TODO: maybe discard points can scale with sample rate from 1 to 3
 DISCARD_POINTS = 3
 ADDITIONAL_WIDTH = 2.0
 class ProbePointAnalysis(object):
@@ -104,6 +105,8 @@ class ProbePointAnalysis(object):
         self.discard = DISCARD_POINTS
         self.additional_width = ADDITIONAL_WIDTH
         self.printer = printer
+        self.trapq = self.printer.lookup_object('motion_report') \
+                        .trapqs['toolhead']
         #self.probe_speed = probe_speed
         #self.pullback_speed = pullback_speed
         #self.trigger_time = trigger_time
@@ -116,11 +119,9 @@ class ProbePointAnalysis(object):
         np_samples = np.array(samples)
         self.time = np_samples[:, 0]
         self.force = np_samples[:, 1]
-        self.moves = self.get_moves()
         self.z = self.get_toolhead_positions(self.time)
     def get_moves(self):
-        trapq = self.printer.lookup_object('motion_report').trapqs['toolhead']
-        moves, cdata  = trapq.extract_trapq(self.time[0], self.time[-1])
+        moves, cdata  = self.trapq.extract_trapq(self.time[0], self.time[-1])
         return moves
     # build toolhead Z position for the time/force points
     def get_toolhead_positions(self, time):
@@ -128,14 +129,19 @@ class ProbePointAnalysis(object):
         z_pos = []
         next_t = 0
         # TODO: assumes this goes from old moves to new moves, like times does
-        for move in self.moves:
+        trapq = self.get_moves()
+        for move in trapq:
             while next_t < len(time) \
                     and self.is_time_in_move(time[next_t], move):
                 z_pos.append(self.calculate_z(time[next_t], move))
                 next_t += 1
+        logging.info('Z Positions: %s' % (z_pos))
         return z_pos
     # test if a print time is inside a move
     def is_time_in_move(self, time, move):
+        # trapq has a move at the end with no time set on it
+        if move.print_time == 0.0 and move.move_t == 0.0:
+            return False
         start_time = move.print_time
         end_time = move.print_time + move.move_t
         return time >= start_time and time < end_time
@@ -153,8 +159,8 @@ class ProbePointAnalysis(object):
         pullback_end_index = index_near(time, self.pullback_end_time)
         pullback_time = time[pullback_start_index:pullback_end_index]
         pullback_force = force[pullback_start_index:pullback_end_index]
-        min_elbow, max_elbow, delta_y = find_kneedle(pullback_time
-                        , pullback_force, additional_width = additional_width)
+        min_elbow, max_elbow, force_delta = find_kneedle(pullback_time
+                        , pullback_force, additional_width)
         # The above finds 2 elbows, we want the one that is a maximum
         # +1 to move to the first point after the elbow
         max_elbow += 1
@@ -168,11 +174,9 @@ class ProbePointAnalysis(object):
         true_t0 = linear_regression(rise_time, rise_force, decompress_time
                                 , decompress_force)
         # find the pullback move from the trapq:
-        for move in self.moves:
-            if self.is_time_in_move(true_t0, move):
-                # z coordinate at true_t0
-                return self.calculate_z(true_t0, move)
-        raise Exception('Pullback move not found in trapq')
+        pos, velocity = self.trapq.get_trapq_position(true_t0)
+        x, y, z = pos
+        return z
 
 class LoadCellCommandHelper:
     def __init__(self, config, load_cell):
@@ -272,7 +276,8 @@ class LoadCellGuidedCalibrationHelper:
         register_command("ABORT", self.cmd_ABORT, desc=self.cmd_ABORT_help)
         register_command("ACCEPT", self.cmd_ACCEPT, desc=self.cmd_ACCEPT_help)
         register_command("TARE", self.cmd_TARE, desc=self.cmd_TARE_help)
-        register_command("CALIBRATE", self.cmd_CALIBRATE, desc=self.cmd_CALIBRATE_help)
+        register_command("CALIBRATE", self.cmd_CALIBRATE
+                                                , desc=self.cmd_CALIBRATE_help)
     def _avg_counts(self):
         try:
             return self.load_cell.avg_counts()
@@ -427,15 +432,57 @@ class LoadCellSampleCollector():
         timeout = 1. + target
         return self._collect_until_test(self._time_test(target), timeout)
 
+class BadTapModule(object):
+    def is_bad_tap(tap_data):
+        return False
+
+class NozzleCleanerModule(object):
+    def clean_nozzle():
+        pass
+
+NOZZLE_CLEANER = "{action_respond_info(\"Bad tap detected, nozzle needs" \
+        " cleaning. nozzle_cleaner_gcode not configured!\")}"
 class LoadCellPrinterProbe(PrinterProbe):
     def __init__(self, config, mcu_probe, load_cell):
         super(LoadCellPrinterProbe, self).__init__(config, mcu_probe)
+        printer = config.get_printer()
         self._load_cell = load_cell
+        self.pullback_dist = config.getfloat('pullback_dist'
+                                        , minval=0.01, maxval=2.0, default=0.1)
+        sps = load_cell.sensor.get_samples_per_second()
+        default_pullback_speed = sps * 0.001
+        #TODO: Math. set the minimum pullback speed such that at least enough samples will be collected
+        # e.g. 5 + 1 + (2 * discard)
+        self.pullback_speed = config.getfloat('pullback_speed'
+                    , minval=0.01, maxval=1.0, default=default_pullback_speed)
         self.pullback_distance = 0.1
         self.pullback_speed = 400. * 0.001
+        self.bad_tap_module = self.load_module(config
+                            , 'bad_tap_module', NozzleCleanerModule())
+        self.nozzle_cleaner_module = self.load_module(config
+                            , 'nozzle_cleaner_module', None)
+        gcode_macro = printer.load_object(config, 'gcode_macro')
+        self.nozzle_cleaner_gcode = gcode_macro.load_template(config,
+                                'nozzle_cleaner_gcode', NOZZLE_CLEANER)
         self.collector = load_cell.get_collector()
+    def load_module(self, config, name, default):
+        module = config.get(name, default=None)
+        return default if module is None else self.printer.lookup_object(module)
+    def check_tap(self, tap_data):
+        if self.bad_tap_module.is_bad_tap(tap_data):
+            if self.nozzle_cleaner_module is not None:
+                self.nozzle_cleaner_module.clean_nozzle()
+            else:
+                macro = self.nozzle_cleaner_gcode
+                context = macro.create_template_context()
+                #TODO: what params do you want?
+                # X,Y,Z of the failed probe?
+                # original requested probe location
+                # how many times this has happened?
+                context['params'] = []
+                macro.run_gcode_from_command(context)
+    #TODO: check_tap() after retract move
     def _probe(self, speed):
-        self._load_cell.continuous_tare()
         self.collector.start_collecting()
         toolhead = self.printer.lookup_object('toolhead')
         curtime = self.printer.get_reactor().monotonic()
@@ -471,11 +518,11 @@ class LoadCellPrinterProbe(PrinterProbe):
         toolhead.move(pullback_pos, self.pullback_speed)
         toolhead.flush_step_generation()
         pullback_end = toolhead.get_last_move_time()
-        pullback_end_pos = toolhead.get_position()
-        with open('/home/pi/printer_data/logs/loadcell.log', 'a') as log:
-            log.write("\"trigger_z\": %s," % (halt_pos[2]))
-            log.write("\"pullback_end_time\": %s," % (pullback_end))
-            log.write("\"pullback_trigger_z\": %s,}," % (pullback_end_pos[2]))
+        #pullback_end_pos = toolhead.get_position()
+        #with open('/home/pi/printer_data/logs/loadcell.log', 'a') as log:
+        #    log.write("\"trigger_z\": %s," % (halt_pos[2]))
+        #    log.write("\"pullback_end_time\": %s," % (pullback_end))
+        #    log.write("\"pullback_trigger_z\": %s,}," % (pullback_end_pos[2]))
         return pullback_end
     def last_move_time(self):
         toolhead = self.printer.lookup_object('toolhead')
@@ -501,7 +548,8 @@ class LoadCell:
                         , self.load_cell_endstop)
             sensor.attach_load_cell_endstop(self.load_cell_endstop.get_oid())
             printer.add_object('probe'
-                        , LoadCellPrinterProbe(config, self.load_cell_endstop, self))
+                        , LoadCellPrinterProbe(config, self.load_cell_endstop
+                                               , self))
         # sensor must implement LoadCellDataSource
         self.tare_counts = None
         self.trailing_counts = collections.deque(maxlen=24)
@@ -510,8 +558,6 @@ class LoadCell:
         self.counts_per_gram = config.getfloat('counts_per_gram', minval=1.
                                             , default=None)
         LoadCellCommandHelper(config, self)
-        self.trigger_force_grams = config.getfloat('trigger_force_grams'
-                                        , minval=10., maxval=250, default=50.)
         # webhooks support
         self.api_dump = WebhooksApiDumpRepeater(printer, "load_cell/dump_force",
                         "load_cell", name,
@@ -552,15 +598,13 @@ class LoadCell:
         self.set_endstop_range()
         self.configfile.set(self.name, 'counts_per_gram',
                              "%.5f" % (counts_per_gram))
-    def set_trigger_force(self, trigger_force_grams):
-        self.trigger_force_grams = trigger_force_grams
     def set_endstop_range(self):
-        if not self.load_cell_endstop or not self.is_calibrated():
+        if not self.load_cell_endstop \
+            or not self.is_calibrated() or not self.is_tared():
             return
-        trigger_counts = int(self.trigger_force_grams * self.counts_per_gram)
-        self.load_cell_endstop.set_range(trigger_counts, self.tare_counts)
+        self.load_cell_endstop.set_range(self.tare_counts, self.counts_per_gram)
     def counts_to_grams(self, sample):
-        if not self.is_calibrated():
+        if not self.is_calibrated() or not self.is_tared():
             return None
         return float(sample - self.tare_counts) / (self.counts_per_gram)
     def saturation_range(self):
@@ -588,20 +632,25 @@ class LoadCell:
     def _last_move_time(self):
         toolhead = self.printer.lookup_object('toolhead')
         return toolhead.get_last_move_time()
-    def continuous_tare(self):
+    # pauses for the last move to complete and then tares the loadcell
+    # returns the last sample record used in taring
+    def pause_and_tare(self):
         import numpy as np
         collector = self.get_collector()
         # collect and discard samples up to the end of the current
         collector.collect_until(self._last_move_time())
         # then collect the next n samples
-        samples = collector.collect_samples(16)
-        tare_counts = int(np.average(samples, axis=0)[2])
+        # Collect 4x60hz power cycles of data to average across power noise
+        sps = self.sensor.get_samples_per_second()
+        num_samples = max(2, round(sps * ((1 / 60) * 4)))
+        tare_samples = collector.collect_samples(num_samples)
+        tare_counts = np.average(np.array(tare_samples)[:,2].astype(float))
         self.tare(tare_counts)
     # I swear on a stack of dictionaries this is correct english...
     def is_tared(self):
         return self.tare_counts is not None
     def is_calibrated(self):
-        return self.is_tared() and self.counts_per_gram is not None
+        return self.counts_per_gram is not None
     def get_sensor(self):
         return self.sensor
     def get_bits(self):

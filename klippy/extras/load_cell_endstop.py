@@ -1,8 +1,10 @@
-import logging, time, chelper
+import logging, chelper
 from mcu import TRSYNC_SINGLE_MCU_TIMEOUT, TRSYNC_TIMEOUT, MCU_trsync
 
 DEFAULT_SAMPLE_COUNT = 2
 WATCHDOG_MAX = 3
+MIN_MSG_TIME = 0.100
+
 #LoadCellEndstop implements mcu_endstop and PrinterProbe
 class LoadCellEndstop:
     def __init__(self, config, load_cell):
@@ -13,19 +15,18 @@ class LoadCellEndstop:
         printer.register_event_handler('klippy:mcu_identify',
                                         self.handle_mcu_identify)
         self._load_cell = load_cell
-        self._sample_collector = load_cell.get_collector()
-        self._sensor = sensor = load_cell.get_sensor()
-        self._mcu = mcu = sensor.get_mcu()
+        self._mcu = mcu = load_cell.get_sensor().get_mcu()
         self._oid = self._mcu.create_oid()
         self._home_cmd = self._query_cmd = self._set_range_cmd = None
         self._trigger_completion = None
         ffi_main, ffi_lib = chelper.get_ffi()
         self._trdispatch = ffi_main.gc(ffi_lib.trdispatch_alloc(), ffi_lib.free)
         self._trsyncs = [MCU_trsync(mcu, self._trdispatch)]
-        self.trigger_counts = 0  # this needs to be read from the conifg and maybe pushed in when the load cell calibrates
-        self.tare_counts = 0  # this needs to be pushed in every time the load cell tares
-        self._home_start_time = 0
-        self.probe_move = None
+        self.trigger_counts = 0
+        self.tare_counts = 0
+        self.last_trigger_time = 0
+        self.trigger_force_grams = config.getfloat('trigger_force_grams'
+                    , minval=10., maxval=250, default=50.)
         self.sample_count = config.getint("sample_count"
             , default=DEFAULT_SAMPLE_COUNT, minval=1, maxval=5)
         self._mcu.add_config_cmd("config_load_cell_endstop oid=%d"
@@ -43,7 +44,8 @@ class LoadCellEndstop:
             " is_triggered=%c trigger_ticks=%u sample=%i sample_ticks=%u",
             oid=self._oid, cq=cmd_queue)
         self._set_range_cmd = self._mcu.lookup_command(
-            "set_range_load_cell_endstop oid=%c trigger_counts=%u tare_counts=%i"
+            "set_range_load_cell_endstop oid=%c trigger_counts=%u" \
+                " tare_counts=%i"
             , cq=cmd_queue)
         self._home_cmd = self._mcu.lookup_command(
             "load_cell_endstop_home oid=%c trsync_oid=%c trigger_reason=%c" \
@@ -52,15 +54,15 @@ class LoadCellEndstop:
         return {
             'trigger_counts': self.trigger_counts,
             'tare_counts': self.tare_counts,
-            'sample_count': self.sample_count
+            'sample_count': self.sample_count,
+            'last_trigger_time': self.last_trigger_time
         }
-    def set_range(self, trigger_counts, tare_counts):
+    def set_range(self, tare_counts, counts_per_gram):
         self.tare_counts = int(tare_counts)
-        self.trigger_counts = abs(int(trigger_counts))
+        self.trigger_counts = abs(int(self.trigger_force_grams 
+                                      * counts_per_gram))
         self._set_range_cmd.send([self._oid, self.trigger_counts,
                                 self.tare_counts])
-        logging.info("LOAD_CELL_ENDSTOP: Range Set: trigger_counts %i,\
-                    tare_counts: %i" % (self.trigger_counts, self.tare_counts))
     def get_mcu(self):
         return self._mcu
     def get_oid(self):
@@ -95,14 +97,16 @@ class LoadCellEndstop:
         # do not permit homing if the load cell is not calibrated
         if not self._load_cell.is_calibrated():
             raise self._printer.command_error("Load Cell not calibrated")
-
         # re-compute rest_time based on the sample rate
-        self._home_start_time = print_time
-        clock = self._mcu.print_time_to_clock(print_time)
         rest_ticks = self._load_cell.sensor.get_clock_ticks_per_sample()
-
-        # duplicode
+        # tare the sensor just before probing
+        # this uses pause(), requiring a print_time update
+        self._load_cell.pause_and_tare()
         reactor = self._mcu.get_printer().get_reactor()
+        now = reactor.monotonic()
+        print_time = self._mcu.estimated_print_time(now) + MIN_MSG_TIME
+        clock = self._mcu.print_time_to_clock(print_time)
+        # copied from endstop.py
         self._trigger_completion = reactor.completion()
         expire_timeout = TRSYNC_TIMEOUT
         if len(self._trsyncs) == 1:
@@ -112,14 +116,11 @@ class LoadCellEndstop:
         etrsync = self._trsyncs[0]
         ffi_main, ffi_lib = chelper.get_ffi()
         ffi_lib.trdispatch_start(self._trdispatch, etrsync.REASON_HOST_REQUEST)
-        # duplicode end
-        self._set_range_cmd.send([self._oid, self.trigger_counts,
-                                self.tare_counts])
+        # end copy
         self._home_cmd.send([self._oid, etrsync.get_oid()
             , etrsync.REASON_ENDSTOP_HIT, clock
             , self.sample_count, rest_ticks, WATCHDOG_MAX]
             , reqclock=clock)
-        self._sample_collector.start_collecting()
         return self._trigger_completion
     def home_wait(self, home_end_time):
         self.home_end_time = home_end_time
@@ -133,13 +134,10 @@ class LoadCellEndstop:
         ffi_lib.trdispatch_stop(self._trdispatch)
         res = [trsync.stop() for trsync in self._trsyncs]
         if any([r == etrsync.REASON_COMMS_TIMEOUT for r in res]):
-            self._sample_collector.stop_collecting()
             return -1.
         if res[0] != etrsync.REASON_ENDSTOP_HIT:
-            self._sample_collector.stop_collecting()
             return 0.
         if self._mcu.is_fileoutput():
-            self._sample_collector.stop_collecting()
             return home_end_time
         params = self._query_cmd.send([self._oid])
         # clear trsync from load_cell_endstop
@@ -154,7 +152,6 @@ class LoadCellEndstop:
         if self._mcu.is_fileoutput():
             return 0
         params = self._query_cmd.send([self._oid], minclock=clock)
-        logging.info("load_cell_endstop_state oid=%u homing=%u homing_triggered=%u is_triggered=%u trigger_ticks=%u sample=%i sample_ticks=%u", params['oid'], params['homing'], params['homing_triggered'], params['is_triggered'], params['trigger_ticks'], params['sample'], params['sample_ticks'])
         if params['homing'] == 1:
             return params['homing_triggered'] == 1
         else:
@@ -164,11 +161,6 @@ class LoadCellEndstop:
     def multi_probe_end(self):
         pass
     def probe_prepare(self, hmove):
-        #TODO: BLTouch has a more sophisticated version of this idea that may save some time
-        # Before beginning probing, make sure any retract moves have completed
-        # this makes sure the retract happens before the trsync gets armed
-        toolhead = self._printer.lookup_object('toolhead')
-        toolhead.dwell(0.001)
-        toolhead.wait_moves()        
+        pass
     def probe_finish(self, hmove):
         pass
