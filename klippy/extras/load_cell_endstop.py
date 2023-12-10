@@ -8,6 +8,7 @@ MIN_MSG_TIME = 0.100
 #LoadCellEndstop implements mcu_endstop and PrinterProbe
 class LoadCellEndstop:
     def __init__(self, config, load_cell):
+        
         self._config = config
         self._config_name = config.get_name()
         self._printer = printer = config.get_printer()
@@ -106,6 +107,8 @@ class LoadCellEndstop:
         now = reactor.monotonic()
         print_time = self._mcu.estimated_print_time(now) + MIN_MSG_TIME
         clock = self._mcu.print_time_to_clock(print_time)
+        self._printer.send_event("load_cell_endstop:homing_start_time"
+                                , print_time)
         # copied from endstop.py
         self._trigger_completion = reactor.completion()
         expire_timeout = TRSYNC_TIMEOUT

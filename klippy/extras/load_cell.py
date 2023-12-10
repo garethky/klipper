@@ -3,17 +3,13 @@
 # Copyright (C) 2022 Gareth Farrington <gareth@waves.ky>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import copy
-import chelper
-import logging, collections
-import probe
+import logging
+import collections
 from . import probe, load_cell_endstop, multiplex_adc
+import chelper
 from probe import PrinterProbe
 
 class SaturationException(Exception):
-    pass
-
-class SampleException(Exception):
     pass
 
 # An API Dump Helper for broadcasting events to clients
@@ -44,139 +40,265 @@ class WebhooksApiDumpRepeater:
 #########################
 # Math Support Functions
 
+# point on a time/force graph
+class ForcePoint(object):
+    def __init__(self, time, force):
+        self.time = time
+        self.force = force
+
 # compute the time some value was surpassed
 def index_near(x, x_val):
     import numpy as np
     return np.argmax(np.asarray(x) >= x_val) or len(x) -1 
 
-def linear_regression(x1, y1, x2, y2):
-    import numpy as np
-    time1 = np.asarray(x1)
-    force1 = np.asarray(y1)
-    m1, b1 = lstsq(time1, force1)[0]
-    time2 = np.asarray(x2)
-    force2 = np.asarray(y2)
-    m2, b2 = lstsq(time2, force2)[0]
+# finds the intersection of 2 groups of points
+def intersection(x1, y1, x2, y2):
+    line1 = lstsq_line(x1, y1)
+    line2 = lstsq_line(x2, y2)
+    return line_intersection(line1, line2)
+
+# finds the intersection of lines
+def line_intersection(line1, line2):
+    m1, b1 = line1
+    m2, b2 = line2
     numerator = -b1 + b2
     denominator = m1 - m2
-    end_time = numerator / denominator
-    return end_time
+    intersection_time = numerator / denominator
+    intersection_force = find_y(line1, intersection_time)
+    return ForcePoint(intersection_time, intersection_force)
 
-# Least Squares on x[] y[] points
-def lstsq(x, y):
+# given a line, return y coordinate for some x value
+def find_y(line, x_value):
+    mx, b = line
+    return mx * x_value + b
+
+# Least Squares on x[] y[] points, returns line = (mx, b)
+def lstsq_line(x, y):
     import numpy as np
+    x = np.asarray(x)
+    y = np.asarray(y)
     x_stacked = np.vstack([x, np.ones(len(x))]).T
-    return np.linalg.lstsq(x_stacked, y, rcond=None)
+    return np.linalg.lstsq(x_stacked, y, rcond=None)[0]
 
 # Kneedle algorithm
 def _kneedle(x, y, x_coords, y_coords):
     import numpy as np
-    x_stacked = np.vstack([x_coords, np.ones(2)]).T
-    mx, b = np.linalg.lstsq(x_stacked, y_coords, rcond=None)[0]
+    line = lstsq_line(x_coords, y_coords)
     # now compute the Y of the line value for every x
     fit_y = []
     for time in x:
-        fit_y.append((mx * time) + b)
+        fit_y.append(find_y(line, time))
     fit_y = np.asarray(fit_y)
     delta_y = fit_y - y
-    return np.argmax(delta_y), np.argmin(delta_y), delta_y
+    max_i = np.argmax(delta_y)
+    min_i = np.argmin(delta_y)
+    # data may have either polarity, so the order is non deterministic
+    # always returns elbows in left-to-right order
+    return (min(max_i, min_i), max(max_i, min_i), delta_y)
 
-# Find Kneedle with additional width
+# Find Kneedle with optional additional width
 def find_kneedle(x, y, additional_width = 0.0):
     start = x[0]
     end = x[-1]
-    extension = (end - start) * (additional_width / 2.0)
+    extension = (end - start) * additional_width
     start = start - extension
     end = end + extension
     x_coords = [start, end]
     y_coords = [y[0], y[-1]]
     return _kneedle(x, y, x_coords, y_coords)
 
+# split a group of points into 3 lines using 2 junction points
+def split_to_lines(x, y, j1, j2, discard=0):
+    l1 = lstsq_line(x[0 + discard : j1 - discard],
+                    y[0 + discard : j1 - discard])
+    l2 = lstsq_line(x[j1 + discard : j2 - discard],
+                    y[j1 + discard : j2 - discard])
+    l3 = lstsq_line(x[j2 + discard : -1 - discard],
+                    y[j2 + discard : -1 - discard])
+    return (l1, l2, l3)
+
+# split a line into 3 parts by elbows. Return lines and intersection points
+def elbow_split(x, y, discard=0, additional_width=0):
+    left_elbow_idx, right_elbow_idx, _ = find_kneedle(x, y, additional_width)
+    l1, l2, l3 = split_to_lines(x, y, left_elbow_idx, right_elbow_idx, discard)
+    i1 = line_intersection(l1, l2)
+    i2 = line_intersection(l2, l3)
+    # return (line, point, line, point, line)
+    return l1, i1, l2, i2, l3
+
+# break a tap event down into 6 points and 5 lines:
+#    *-----*|       /*-----*
+#           |      /
+#           *----*/
+def tap_decompose(time, force, homing_end_idx, pullback_start_idx,
+                  discard=0, additional_width=0):
+    start_x = time[0: pullback_start_idx - 1]
+    start_y = force[0: pullback_start_idx - 1]
+    l1, i1, l2, i2, l3 = elbow_split(start_x, start_y, discard, additional_width)
+    start = ForcePoint(time[0], find_y(l1, time[0]))
+    end_x =  time[homing_end_idx + 1: -1]
+    end_y =  force[homing_end_idx + 1: -1]
+    _, i3, l4, i4, l5 = elbow_split(end_x, end_y, discard, additional_width)
+    end = ForcePoint(time[-1], find_y(l5, time[-1]))
+    return (start, i1, i2, i3, i4, end), (l1, l2, l3, l4, l5)
+
+class TrapqMove(object):
+    def __init__(self, move):
+        # copy cdata to python memory
+        self.print_time = float(move.print_time)
+        self.move_t = float(move.move_t)
+        self.start_v = float(move.start_v)
+        self.accel = float(move.accel)
+        self.start_x = float(move.start_x)
+        self.start_y = float(move.start_y)
+        self.start_z = float(move.start_z)
+        self.x_r = float(move.x_r)
+        self.y_r = float(move.y_r)
+        self.z_r = float(move.z_r)
+    def to_string(self):
+        return ("print_time=%.6f move_t=%.6f start_v=%.6f accel=%.6f"
+            " start_pos=(%.6f,%.6f,%.6f) ar=(%.6f,%.6f,%.6f)"
+            % (self.print_time, self.move_t, self.start_v, self.accel,
+                self.start_x, self.start_y, self.start_z, self.x_r,
+                self.y_r, self.z_r))
+
+def trapq_move_to_dict(move):
+    return {'print_time': float(move.print_time),
+            'move_t': float(move.move_t),
+            'start_v': float(move.start_v),
+            'accel': float(move.accel),
+            'start_x': float(move.start_x),
+            'start_y': float(move.start_y),
+            'start_z': float(move.start_z),
+            'x_r': float(move.x_r),
+            'y_r': float(move.y_r),
+            'z_r': float(move.z_r)
+        }
+
 #TODO: maybe discard points can scale with sample rate from 1 to 3
 DISCARD_POINTS = 3
-ADDITIONAL_WIDTH = 2.0
-class ProbePointAnalysis(object):
-    def __init__(self, printer, home_end_time, pullback_end_time):
-        self.samples = None
-        self.time = None
-        self.force = None
-        self.z = None
-        self.moves = None
-        self.discard = DISCARD_POINTS
-        self.additional_width = ADDITIONAL_WIDTH
-        self.printer = printer
-        self.trapq = self.printer.lookup_object('motion_report') \
-                        .trapqs['toolhead']
-        #self.probe_speed = probe_speed
-        #self.pullback_speed = pullback_speed
-        #self.trigger_time = trigger_time
-        self.home_end_time = home_end_time
-        self.pullback_end_time = pullback_end_time
-    def set_samples(self, samples):
+ADDITIONAL_WIDTH = 1.0
+class TapAnalysis(object):
+    def __init__(self, printer, samples, home_end_time, pullback_start_time, pullback_length):
         import numpy as np
-        # todo: does this need trimming?
-        # convert samples to force and time arrays
+        self.printer = printer
+        self.trapq = printer.lookup_object('motion_report').trapqs['toolhead']
+        # TODO: tune this based on SPS and speed
+        self.discard = DISCARD_POINTS
+        #REVIEW: does this factor need to be configuration?
+        self.additional_width = ADDITIONAL_WIDTH
+        self.pullback_length = pullback_length
+        self.home_end_time = home_end_time
+        self.pullback_start_time = pullback_start_time
         np_samples = np.array(samples)
         self.time = np_samples[:, 0]
         self.force = np_samples[:, 1]
-        self.z = self.get_toolhead_positions(self.time)
+        self.moves = self.get_moves()
+        self.fix_homing_end()
+        self.tap_points = None
+        self.tap_lines = None
+        self.log_moves()
+    # build toolhead Z position for the time/force points
+    def get_toolhead_positions(self):
+        z_pos = []
+        for time in self.time:
+            z_pos.append(self.get_toolhead_position(time))
+        return z_pos
+    def get_toolhead_position(self, print_time):
+        for i, move in enumerate(self.moves):
+            start_time = move['print_time']
+            # time before first move, printer was stationary
+            if i == 0 and print_time < start_time:
+                return move['start_z']
+            end_time = float('inf')
+            if i < (len(self.moves) - 1):
+                end_time = self.moves[i + 1]['print_time']
+            if print_time >= start_time and print_time < end_time:
+                # we have found the move
+                move_t = move['move_t']
+                move_time = max(0., 
+                        min(move_t, print_time - move['print_time']))
+                dist = ((move['start_v'] + .5 * move['accel'] * move_time)
+                            * move_time)
+                pos = ((move['start_x'] + move['x_r'] * dist,
+                        move['start_y'] + move['y_r'] * dist,
+                        move['start_z'] + move['z_r'] * dist))
+                return pos
+            else:
+                continue
+        raise Exception("Move not found, thats impossible!")
+    # prune the long probing moves to pullback length
+    def trim(self):
+        home_end_index = index_near(self.time, self.home_end_time)
+        z_homing_end = self.pos[home_end_index]
+        start_index = 0
+        for i, z_val in enumerate(self.pos):
+            if z_homing_end > z_val:
+                start_index = i
+            else:
+                break
+        self.time = self.time[start_index:]
+        self.force = self.force[start_index:]
+        self.pos = self.pos[start_index:]
+    # adjust move_t of move 1 to match the toolhead position of move 2
+    def fix_homing_end(self):
+        # REVIEW: This takes some logical shortcuts, does it need to be more
+        # generalized? e.g. to all 3 axes?
+        homing_move = self.moves[1]
+        # acceleration should be 0!
+        accel = homing_move['accel']
+        if (accel != 0.):
+            raise Exception('Unexpected acceleration in probing move')
+        start_v = homing_move['start_v']
+        start_z = homing_move['start_z']
+        end_z = self.moves[2]['start_z']
+        # how long did it take to get to end_z?
+        move_t = abs((end_z - start_z) / start_v)
+        self.home_end_time = homing_move['print_time'] + move_t
+        self.moves[1]['move_t'] = move_t
+    def log_moves(self):
+        for i, move in enumerate(self.moves):
+            logging.info("Move %s: %s" % (i, move))
     def get_moves(self):
         moves, cdata  = self.trapq.extract_trapq(self.time[0], self.time[-1])
-        return moves
-    # build toolhead Z position for the time/force points
-    def get_toolhead_positions(self, time):
-        # pull the movement queue data for the time of the move
-        z_pos = []
-        next_t = 0
-        # TODO: assumes this goes from old moves to new moves, like times does
-        trapq = self.get_moves()
-        for move in trapq:
-            while next_t < len(time) \
-                    and self.is_time_in_move(time[next_t], move):
-                z_pos.append(self.calculate_z(time[next_t], move))
-                next_t += 1
-        logging.info('Z Positions: %s' % (z_pos))
-        return z_pos
-    # test if a print time is inside a move
-    def is_time_in_move(self, time, move):
-        # trapq has a move at the end with no time set on it
-        if move.print_time == 0.0 and move.move_t == 0.0:
-            return False
-        start_time = move.print_time
-        end_time = move.print_time + move.move_t
-        return time >= start_time and time < end_time
-    # given a move and a print time inside that move, calculate z
-    def calculate_z(self, print_time, move):
-        move_time = max(0., min(move.move_t, print_time - move.print_time))
-        dist = (move.start_v + .5 * move.accel * move_time) * move_time
-        return move.start_z + move.z_r * dist
+        moves_out = []
+        for move in moves:
+            moves_out.append(trapq_move_to_dict(move))
+        # it could be 5, in theory, but if it is, thats bad
+        if (len(moves_out) != 6):
+            raise Exception("Expected 6 moves from trapq")
+        return moves_out
     def analyze(self):
         discard = self.discard
         additional_width = self.additional_width
         force = self.force
         time = self.time
-        pullback_start_index = index_near(time, self.home_end_time)
-        pullback_end_index = index_near(time, self.pullback_end_time)
-        pullback_time = time[pullback_start_index:pullback_end_index]
-        pullback_force = force[pullback_start_index:pullback_end_index]
-        min_elbow, max_elbow, force_delta = find_kneedle(pullback_time
-                        , pullback_force, additional_width)
-        # The above finds 2 elbows, we want the one that is a maximum
-        # +1 to move to the first point after the elbow
-        max_elbow += 1
-        # split the pullback data in 2 about the elbow,
-        # discarding points near the elbow and ends
-        rise_time = pullback_time[min_elbow + discard: max_elbow - discard]
-        rise_force = pullback_force[min_elbow + discard: max_elbow - discard]
-        decompress_time = pullback_time[max_elbow + discard: -1]
-        decompress_force = pullback_force[max_elbow + discard: -1]
-        # use linear regression to compute the time when the two lines intersect
-        true_t0 = linear_regression(rise_time, rise_force, decompress_time
-                                , decompress_force)
-        # find the pullback move from the trapq:
-        pos, velocity = self.trapq.get_trapq_position(true_t0)
-        x, y, z = pos
-        return z
+        # ths index is SUS!
+        homing_end_index = index_near(time, self.home_end_time)
+        pullback_start_index = index_near(time, self.pullback_start_time)
+        points, lines = tap_decompose(time, force, homing_end_index,
+                            pullback_start_index, discard, additional_width)
+        self.tap_points = points
+        self.tap_lines = lines
+        p1, p2, p3, p4, p5, p6 = points
+        pos = self.get_toolhead_position(p5.time)
+        return pos[2]
+    def get_tap_data(self):
+        p1, p2, p3, p4, p5, p6 = self.tap_points
+        return {
+            'graph': {
+                'time': self.time.tolist(),
+                'force': self.force.tolist(),
+                'position': None
+            },
+            'points': [[p1.time, p1.force],
+                [p2.time, p2.force],
+                [p3.time, p3.force],
+                [p4.time, p4.force],
+                [p5.time, p5.force],
+                [p6.time, p6.force]
+            ]
+        }
 
 class LoadCellCommandHelper:
     def __init__(self, config, load_cell):
@@ -254,9 +376,6 @@ class LoadCellCommandHelper:
                           % (min_pct, max_pct))
         gcmd.respond_info("Sample range / sensor capacity: %.5f%%"
                           % ((max_pct - min_pct) / 2.))
-        #gcmd.respond_info("Errors: %i" % (total_errors))
-        #if (total_errors > 0):
-        #    gcmd.respond_info("Error breakdown: %s" % errors)
 
 class LoadCellGuidedCalibrationHelper:
     def __init__(self, printer, load_cell):
@@ -268,7 +387,7 @@ class LoadCellGuidedCalibrationHelper:
         self.gcode.respond_info(
             "Starting load cell calibration. \n"
             "1.) Remove all load and run TARE. \n"
-            "2.) Apply a known load an run CALIBRATE GRAMS=nnn. \n"
+            "2.) Apply a known load, run CALIBRATE GRAMS=nnn. \n"
             "Complete calibration with the ACCEPT command.\n"
             "Use the ABORT command to quit.")
     def register_commands(self):
@@ -285,10 +404,6 @@ class LoadCellGuidedCalibrationHelper:
             raise self.printer.command_error(
                 "ERROR: Some load cell readings were saturated!\n"
                 " (100% load). Use less force.")
-        except SampleException:
-            raise self.printer.command_error(
-                "ERROR: Load cell failed to read reliably!\n "
-                "Check the sensor's wiring and configuration.")
     # convert the delta of counts to a counts/gram metric
     def counts_per_gram(self, grams, cal_counts):
         return float(abs(int(self._tare_counts - cal_counts))) / grams
@@ -367,7 +482,7 @@ class LoadCellGuidedCalibrationHelper:
 
 # Utility to easily collect some samples for later analysis
 # Optionally blocks execution while collecting with reactor.pause()
-# can collect a minimum n samples or collect until a specific print time
+# can collect a minimum n samples or collect until a specific print_time
 # samples returned in [[time],[force],[counts]] arrays for easy processing
 RETRY_DELAY = 0.01  # 100Hz
 class LoadCellSampleCollector():
@@ -375,23 +490,28 @@ class LoadCellSampleCollector():
         self._load_cell = load_cell
         self._reactor = reactor
         self._mcu = load_cell.sensor.get_mcu()
-        self.target_samples = 1
+        self.min_time = 0.
+        self.max_time = float("inf")
         self._samples = collections.deque()
-        self._errors = collections.deque()
         self._client = None
     def _on_samples(self, data):
-        self._samples.extend(data["params"]['samples'])
-    def start_collecting(self):
+        samples = data["params"]['samples']
+        for sample in samples:
+            time = sample[0]
+            if time >= self.min_time and time <= self.max_time:
+                self._samples.append(sample)
+    def start_collecting(self, min_time=0.):
         self.stop_collecting()
         self._samples.clear()
-        self._errors.clear()
+        self.min_time = min_time
+        self.max_time = float("inf")
         self._client = self._load_cell.subscribe(self._on_samples)
     def stop_collecting(self):
         if self.is_collecting():
             self._client.close()
             self._client = None
     def get_samples(self):
-        return copy.copy(self._samples)
+        return list(self._samples)
     def is_collecting(self):
         return self._client is not None
     # return true when the last sample has a time after the target time
@@ -417,73 +537,80 @@ class LoadCellSampleCollector():
             self._reactor.pause(now + RETRY_DELAY)
         self.stop_collecting()
         return self.get_samples()
-    # block execution until n samples are collected
-    def collect_samples(self, samples=None):
-        target = self.target_samples if samples == None else samples
+    # block execution until at least n samples are collected
+    def collect_samples(self, samples=1):
         now = self._reactor.monotonic()
         print_time = self._mcu.estimated_print_time(now)
         timeout = print_time + 1. + \
-            (target / self._load_cell.sensor.get_samples_per_second())
-        return self._collect_until_test(self._count_test(target), timeout)
+            (samples / self._load_cell.sensor.get_samples_per_second())
+        return self._collect_until_test(self._count_test(samples), timeout)
     # block execution until a sample is returned with a timestamp after time
     def collect_until(self, time=None):
         now = self._reactor.monotonic()
-        target = now if time == None else time
+        target = now if time is None else time
+        self.max_time = target
         timeout = 1. + target
         return self._collect_until_test(self._time_test(target), timeout)
 
 class BadTapModule(object):
-    def is_bad_tap(tap_data):
+    def is_bad_tap(self, tap_data):
         return False
 
 class NozzleCleanerModule(object):
-    def clean_nozzle():
+    def clean_nozzle(self):
         pass
 
 NOZZLE_CLEANER = "{action_respond_info(\"Bad tap detected, nozzle needs" \
         " cleaning. nozzle_cleaner_gcode not configured!\")}"
 class LoadCellPrinterProbe(PrinterProbe):
-    def __init__(self, config, mcu_probe, load_cell):
-        super(LoadCellPrinterProbe, self).__init__(config, mcu_probe)
+    def __init__(self, config, load_cell_endstop, load_cell):
+        super(LoadCellPrinterProbe, self).__init__(config, load_cell_endstop)
+        self.load_cell = load_cell
+        self.load_cell_endstop = load_cell_endstop
         printer = config.get_printer()
         self._load_cell = load_cell
         self.pullback_dist = config.getfloat('pullback_dist'
                                         , minval=0.01, maxval=2.0, default=0.1)
         sps = load_cell.sensor.get_samples_per_second()
         default_pullback_speed = sps * 0.001
-        #TODO: Math. set the minimum pullback speed such that at least enough samples will be collected
+        #TODO: Math: set the minimum pullback speed such that at least enough samples will be collected
         # e.g. 5 + 1 + (2 * discard)
         self.pullback_speed = config.getfloat('pullback_speed'
                     , minval=0.01, maxval=1.0, default=default_pullback_speed)
         self.pullback_distance = 0.1
         self.pullback_speed = 400. * 0.001
         self.bad_tap_module = self.load_module(config
-                            , 'bad_tap_module', NozzleCleanerModule())
+                            , 'bad_tap_module', BadTapModule())
         self.nozzle_cleaner_module = self.load_module(config
                             , 'nozzle_cleaner_module', None)
         gcode_macro = printer.load_object(config, 'gcode_macro')
         self.nozzle_cleaner_gcode = gcode_macro.load_template(config,
                                 'nozzle_cleaner_gcode', NOZZLE_CLEANER)
-        self.collector = load_cell.get_collector()
+        self.collector = None
+        self.printer.register_event_handler(
+            "load_cell_endstop:homing_start_time"
+            , self._handle_homing_start_time)
     def load_module(self, config, name, default):
         module = config.get(name, default=None)
         return default if module is None else self.printer.lookup_object(module)
+    def _handle_homing_start_time(self, print_time):
+        if self.collector is not None:
+            self.collector.start_collecting(print_time)
     def check_tap(self, tap_data):
         if self.bad_tap_module.is_bad_tap(tap_data):
+            #TODO: what params to pass to nozzle cleaners?
+                # X,Y,Z of the failed probe?
+                # original requested probe location
+                # how many times this has happened?
             if self.nozzle_cleaner_module is not None:
                 self.nozzle_cleaner_module.clean_nozzle()
             else:
                 macro = self.nozzle_cleaner_gcode
                 context = macro.create_template_context()
-                #TODO: what params do you want?
-                # X,Y,Z of the failed probe?
-                # original requested probe location
-                # how many times this has happened?
                 context['params'] = []
                 macro.run_gcode_from_command(context)
-    #TODO: check_tap() after retract move
     def _probe(self, speed):
-        self.collector.start_collecting()
+        self.collector = self.load_cell.get_collector()
         toolhead = self.printer.lookup_object('toolhead')
         curtime = self.printer.get_reactor().monotonic()
         if 'z' not in toolhead.get_status(curtime)['homed_axes']:
@@ -495,38 +622,39 @@ class LoadCellPrinterProbe(PrinterProbe):
             epos = phoming.probing_move(self.mcu_probe, pos, speed)
         except self.printer.command_error as e:
             self.collector.stop_collecting()
+            self.collector = None
             reason = str(e)
             if "Timeout during endstop homing" in reason:
                 reason += probe.HINT_TIMEOUT
             raise self.printer.command_error(reason)
-        
-        homing_end_time = self.last_move_time()
-        pullback_end_time = self.pullback_move()
-        ppa = ProbePointAnalysis(self.printer
-                                 , homing_end_time, pullback_end_time)
-        ppa.set_samples(self.collector.collect_until(pullback_end_time))
+        homing_end_time = toolhead.get_last_move_time()
+        pullback_end_time, end_pos = self.pullback_move()
+        logging.info("homing_end_time %s, pullback_end_time %s" % (homing_end_time, pullback_end_time))
+        samples = self.collector.collect_until(pullback_end_time)
+        self.collector = None
+        ppa = TapAnalysis(self.printer, samples
+                , homing_end_time, pullback_end_time, self.pullback_distance)
         z_point = ppa.analyze()
-        epos[2] = z_point
-        self.gcode.respond_info("probe at %.3f,%.3f is z=%.6f"
+        tap_data = ppa.get_tap_data()
+        self.load_cell.send_endstop_event(tap_data)
+        is_bad = self.check_tap(tap_data)
+        if not is_bad:
+            epos[2] = z_point
+            self.gcode.respond_info("probe at %.3f,%.3f is z=%.6f"
                                 % (epos[0], epos[1], epos[2]))
-        return epos[:3]
+            return epos[:3]
+        else:
+            #TODO: if tap is bad, prevent probe from using it
+            raise Exception("Bad tap handling not implemented")
     def pullback_move(self):
         toolhead = self.printer.lookup_object('toolhead')
-        halt_pos = toolhead.get_position()
-        pullback_pos = list(halt_pos)
+        pullback_pos = toolhead.get_position()
         pullback_pos[2] += self.pullback_distance
         toolhead.move(pullback_pos, self.pullback_speed)
         toolhead.flush_step_generation()
         pullback_end = toolhead.get_last_move_time()
-        #pullback_end_pos = toolhead.get_position()
-        #with open('/home/pi/printer_data/logs/loadcell.log', 'a') as log:
-        #    log.write("\"trigger_z\": %s," % (halt_pos[2]))
-        #    log.write("\"pullback_end_time\": %s," % (pullback_end))
-        #    log.write("\"pullback_trigger_z\": %s,}," % (pullback_end_pos[2]))
-        return pullback_end
-    def last_move_time(self):
-        toolhead = self.printer.lookup_object('toolhead')
-        return toolhead.get_last_move_time()
+        pullback_end_pos = toolhead.get_position()
+        return pullback_end, pullback_end_pos
 
 # Printer class that controls the load cell
 class LoadCell:
@@ -623,27 +751,26 @@ class LoadCell:
         # check samples for saturated readings
         min, max = self.saturation_range()
         for sample in samples:
-            # TODO: what if there were errors while sampling?
             if sample[2] >= max or sample[2] <= min:
                 raise SaturationException(
                     "Some samples are saturated (+/-100%)")
         counts = np.asarray(samples)[:, 2].astype(float)
-        return np.average(counts)
-    def _last_move_time(self):
-        toolhead = self.printer.lookup_object('toolhead')
-        return toolhead.get_last_move_time()
+        return np.average(counts)    
     # pauses for the last move to complete and then tares the loadcell
     # returns the last sample record used in taring
     def pause_and_tare(self):
         import numpy as np
+        toolhead = self.printer.lookup_object('toolhead')
         collector = self.get_collector()
         # collect and discard samples up to the end of the current
-        collector.collect_until(self._last_move_time())
+        collector.collect_until(toolhead.get_last_move_time())
+        logging.info("pause_and_tare, collect_until")
         # then collect the next n samples
         # Collect 4x60hz power cycles of data to average across power noise
         sps = self.sensor.get_samples_per_second()
         num_samples = max(2, round(sps * ((1 / 60) * 4)))
         tare_samples = collector.collect_samples(num_samples)
+        logging.info("pause_and_tare, collect_samples")
         tare_counts = np.average(np.array(tare_samples)[:,2].astype(float))
         self.tare(tare_counts)
     # I swear on a stack of dictionaries this is correct english...
