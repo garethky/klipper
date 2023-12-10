@@ -481,7 +481,7 @@ class LoadCellGuidedCalibrationHelper:
 # Optionally blocks execution while collecting with reactor.pause()
 # can collect a minimum n samples or collect until a specific print_time
 # samples returned in [[time],[force],[counts]] arrays for easy processing
-RETRY_DELAY = 0.01  # 100Hz
+RETRY_DELAY = 0.05  # 20Hz
 class LoadCellSampleCollector():
     def __init__(self, load_cell, reactor):
         self._load_cell = load_cell
@@ -489,6 +489,7 @@ class LoadCellSampleCollector():
         self._mcu = load_cell.sensor.get_mcu()
         self.min_time = 0.
         self.max_time = float("inf")
+        self.finished = False
         self._samples = collections.deque()
         self._client = None
     def _on_samples(self, data):
@@ -497,11 +498,14 @@ class LoadCellSampleCollector():
             time = sample[0]
             if time >= self.min_time and time <= self.max_time:
                 self._samples.append(sample)
-    def start_collecting(self, min_time=0.):
+            if time > self.max_time:
+                self.stop_collecting()
+    def start_collecting(self, min_time=0., max_time=float("inf")):
         self.stop_collecting()
         self._samples.clear()
         self.min_time = min_time
-        self.max_time = float("inf")
+        self.max_time = max_time
+        self.finished = False
         self._client = self._load_cell.subscribe(self._on_samples)
     def stop_collecting(self):
         if self.is_collecting():
@@ -513,9 +517,9 @@ class LoadCellSampleCollector():
         return self._client is not None
     # return true when the last sample has a time after the target time
     def _time_test(self, print_time):
+        collector = self
         def test():
-            return (not len(self._samples) == 0) \
-                        and self._samples[-1][0] >= print_time
+            return not collector.is_collecting()
         return test
     # return true when a set number of samples have been collected
     def _count_test(self, target):
@@ -529,8 +533,7 @@ class LoadCellSampleCollector():
             now = self._reactor.monotonic()
             print_time = self._mcu.estimated_print_time(now)
             if (print_time > timeout):
-                logging.error("LoadCellSampleCollector.collect_? timed out")
-                break
+                raise Exception("LoadCellSampleCollector timed out")
             self._reactor.pause(now + RETRY_DELAY)
         self.stop_collecting()
         return self.get_samples()
@@ -545,7 +548,7 @@ class LoadCellSampleCollector():
     def collect_until(self, time=None):
         now = self._reactor.monotonic()
         target = now if time is None else time
-        self.max_time = target
+        self.start_collecting(max_time=target)
         timeout = 1. + target
         return self._collect_until_test(self._time_test(target), timeout)
 
