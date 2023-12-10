@@ -548,7 +548,9 @@ class LoadCellSampleCollector():
     def collect_until(self, time=None):
         now = self._reactor.monotonic()
         target = now if time is None else time
-        self.start_collecting(max_time=target)
+        if not self.is_collecting():
+            self.start_collecting(max_time=target)
+        self.max_time = target
         timeout = 1. + target
         return self._collect_until_test(self._time_test(target), timeout)
 
