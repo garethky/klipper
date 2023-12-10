@@ -92,9 +92,11 @@ def _kneedle(x, y, x_coords, y_coords):
     delta_y = fit_y - y
     max_i = np.argmax(delta_y)
     min_i = np.argmin(delta_y)
+    #return (max_i, min_i)
     # data may have either polarity, so the order is non deterministic
     # always returns elbows in left-to-right order
-    return (min(max_i, min_i), max(max_i, min_i), delta_y)
+    return (min(max_i, min_i), max(max_i, min_i))
+    
 
 # Find Kneedle with optional additional width
 def find_kneedle(x, y, additional_width = 0.0):
@@ -119,8 +121,10 @@ def split_to_lines(x, y, j1, j2, discard=0):
 
 # split a line into 3 parts by elbows. Return lines and intersection points
 def elbow_split(x, y, discard=0, additional_width=0):
-    left_elbow_idx, right_elbow_idx, _ = find_kneedle(x, y, additional_width)
-    l1, l2, l3 = split_to_lines(x, y, left_elbow_idx, right_elbow_idx, discard)
+    left_elbow_idx, right_elbow_idx = find_kneedle(x, y, additional_width)
+    # try to leave all points in the middle segment
+    l1, l2, l3 = split_to_lines(x, y, left_elbow_idx - 1,
+                                right_elbow_idx + 1, discard)
     i1 = line_intersection(l1, l2)
     i2 = line_intersection(l2, l3)
     # return (line, point, line, point, line)
@@ -134,10 +138,14 @@ def tap_decompose(time, force, homing_end_idx, pullback_start_idx,
                   discard=0, additional_width=0):
     start_x = time[0: pullback_start_idx - 1]
     start_y = force[0: pullback_start_idx - 1]
-    l1, i1, l2, i2, l3 = elbow_split(start_x, start_y, discard, additional_width)
+    # discard=0 because there are so few points in the probe line
+    l1, i1, l2, i2, l3 = elbow_split(start_x, start_y, 0, additional_width)
     start = ForcePoint(time[0], find_y(l1, time[0]))
-    end_x =  time[homing_end_idx + 1: -1]
-    end_y =  force[homing_end_idx + 1: -1]
+    homing_end_idx = index_near(time, i2.time) + discard
+    # the points after homing stop are very noisy, exclude half of them
+    midpoint = homing_end_idx + ((pullback_start_idx - homing_end_idx) // 2)
+    end_x = time[midpoint: -1]
+    end_y = force[midpoint: -1]
     _, i3, l4, i4, l5 = elbow_split(end_x, end_y, discard, additional_width)
     end = ForcePoint(time[-1], find_y(l5, time[-1]))
     return (start, i1, i2, i3, i4, end), (l1, l2, l3, l4, l5)
@@ -179,7 +187,7 @@ def trapq_move_to_dict(move):
 DISCARD_POINTS = 3
 ADDITIONAL_WIDTH = 1.0
 class TapAnalysis(object):
-    def __init__(self, printer, samples, home_end_time, pullback_start_time, pullback_length):
+    def __init__(self, printer, samples):
         import numpy as np
         self.printer = printer
         self.trapq = printer.lookup_object('motion_report').trapqs['toolhead']
@@ -187,17 +195,17 @@ class TapAnalysis(object):
         self.discard = DISCARD_POINTS
         #REVIEW: does this factor need to be configuration?
         self.additional_width = ADDITIONAL_WIDTH
-        self.pullback_length = pullback_length
-        self.home_end_time = home_end_time
-        self.pullback_start_time = pullback_start_time
         np_samples = np.array(samples)
         self.time = np_samples[:, 0]
         self.force = np_samples[:, 1]
         self.moves = self.get_moves()
+        self.home_end_time = self.moves[2]['print_time']
+        self.pullback_start_time = self.moves[3]['print_time']
         self.fix_homing_end()
+        self.pos = self.get_toolhead_positions()
         self.tap_points = None
         self.tap_lines = None
-        self.log_moves()
+        #self.log_moves()
     # build toolhead Z position for the time/force points
     def get_toolhead_positions(self):
         z_pos = []
@@ -227,19 +235,6 @@ class TapAnalysis(object):
             else:
                 continue
         raise Exception("Move not found, thats impossible!")
-    # prune the long probing moves to pullback length
-    def trim(self):
-        home_end_index = index_near(self.time, self.home_end_time)
-        z_homing_end = self.pos[home_end_index]
-        start_index = 0
-        for i, z_val in enumerate(self.pos):
-            if z_homing_end > z_val:
-                start_index = i
-            else:
-                break
-        self.time = self.time[start_index:]
-        self.force = self.force[start_index:]
-        self.pos = self.pos[start_index:]
     # adjust move_t of move 1 to match the toolhead position of move 2
     def fix_homing_end(self):
         # REVIEW: This takes some logical shortcuts, does it need to be more
@@ -273,7 +268,6 @@ class TapAnalysis(object):
         additional_width = self.additional_width
         force = self.force
         time = self.time
-        # ths index is SUS!
         homing_end_index = index_near(time, self.home_end_time)
         pullback_start_index = index_near(time, self.pullback_start_time)
         points, lines = tap_decompose(time, force, homing_end_index,
@@ -289,15 +283,18 @@ class TapAnalysis(object):
             'graph': {
                 'time': self.time.tolist(),
                 'force': self.force.tolist(),
-                'position': None
+                'position': None,
             },
-            'points': [[p1.time, p1.force],
-                [p2.time, p2.force],
-                [p3.time, p3.force],
-                [p4.time, p4.force],
-                [p5.time, p5.force],
-                [p6.time, p6.force]
-            ]
+            'points': [
+                {'time': p1.time, 'force': p1.force},
+                {'time': p2.time, 'force': p2.force},
+                {'time': p3.time, 'force': p3.force},
+                {'time': p4.time, 'force': p4.force},
+                {'time': p5.time, 'force': p5.force},
+                {'time': p6.time, 'force': p6.force}
+            ],
+            'home_end_time': self.home_end_time,
+            'pullback_start_time': self.pullback_start_time,
         }
 
 class LoadCellCommandHelper:
@@ -627,13 +624,10 @@ class LoadCellPrinterProbe(PrinterProbe):
             if "Timeout during endstop homing" in reason:
                 reason += probe.HINT_TIMEOUT
             raise self.printer.command_error(reason)
-        homing_end_time = toolhead.get_last_move_time()
-        pullback_end_time, end_pos = self.pullback_move()
-        logging.info("homing_end_time %s, pullback_end_time %s" % (homing_end_time, pullback_end_time))
+        pullback_end_time = self.pullback_move()
         samples = self.collector.collect_until(pullback_end_time)
         self.collector = None
-        ppa = TapAnalysis(self.printer, samples
-                , homing_end_time, pullback_end_time, self.pullback_distance)
+        ppa = TapAnalysis(self.printer, samples)
         z_point = ppa.analyze()
         tap_data = ppa.get_tap_data()
         self.load_cell.send_endstop_event(tap_data)
@@ -653,8 +647,7 @@ class LoadCellPrinterProbe(PrinterProbe):
         toolhead.move(pullback_pos, self.pullback_speed)
         toolhead.flush_step_generation()
         pullback_end = toolhead.get_last_move_time()
-        pullback_end_pos = toolhead.get_position()
-        return pullback_end, pullback_end_pos
+        return pullback_end
 
 # Printer class that controls the load cell
 class LoadCell:
@@ -764,13 +757,11 @@ class LoadCell:
         collector = self.get_collector()
         # collect and discard samples up to the end of the current
         collector.collect_until(toolhead.get_last_move_time())
-        logging.info("pause_and_tare, collect_until")
         # then collect the next n samples
         # Collect 4x60hz power cycles of data to average across power noise
         sps = self.sensor.get_samples_per_second()
         num_samples = max(2, round(sps * ((1 / 60) * 4)))
         tare_samples = collector.collect_samples(num_samples)
-        logging.info("pause_and_tare, collect_samples")
         tare_counts = np.average(np.array(tare_samples)[:,2].astype(float))
         self.tare(tare_counts)
     # I swear on a stack of dictionaries this is correct english...
