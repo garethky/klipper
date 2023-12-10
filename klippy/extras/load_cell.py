@@ -630,7 +630,8 @@ class LoadCellPrinterProbe(PrinterProbe):
                 reason += probe.HINT_TIMEOUT
             raise self.printer.command_error(reason)
         pullback_end_time = self.pullback_move()
-        samples = self.collector.collect_until(pullback_end_time)
+        # collect until 200ms after the move ends to stretch line
+        samples = self.collector.collect_until(pullback_end_time + 0.2)
         self.collector = None
         ppa = TapAnalysis(self.printer, samples)
         z_point = ppa.analyze()
