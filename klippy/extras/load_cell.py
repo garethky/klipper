@@ -575,10 +575,13 @@ class LoadCellPrinterProbe(PrinterProbe):
                                         , minval=0.01, maxval=2.0, default=0.1)
         sps = load_cell.sensor.get_samples_per_second()
         default_pullback_speed = sps * 0.001
-        #TODO: Math: set the minimum pullback speed such that at least enough samples will be collected
+        #TODO: Math: set the minimum pullback speed such that at least 
+        # enough samples will be collected
         # e.g. 5 + 1 + (2 * discard)
         self.pullback_speed = config.getfloat('pullback_speed'
                     , minval=0.01, maxval=1.0, default=default_pullback_speed)
+        self.pullback_extra_time = config.getfloat('pullback_extra_time'
+                    , minval=0.00, maxval=1.0, default=0.2)
         self.pullback_distance = 0.1
         self.pullback_speed = 400. * 0.001
         self.bad_tap_module = self.load_module(config
@@ -630,8 +633,8 @@ class LoadCellPrinterProbe(PrinterProbe):
                 reason += probe.HINT_TIMEOUT
             raise self.printer.command_error(reason)
         pullback_end_time = self.pullback_move()
-        # collect until 200ms after the move ends to stretch line
-        samples = self.collector.collect_until(pullback_end_time + 0.2)
+        samples = self.collector.collect_until(pullback_end_time 
+                                               + self.pullback_extra_time)
         self.collector = None
         ppa = TapAnalysis(self.printer, samples)
         z_point = ppa.analyze()
