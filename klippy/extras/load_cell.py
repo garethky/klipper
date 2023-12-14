@@ -46,6 +46,8 @@ class ForcePoint(object):
     def __init__(self, time, force):
         self.time = time
         self.force = force
+    def to_dict(self):
+        return {'time': self.time, 'force': self.force}
     
 class ForceLine(object):
     def __init__(self, slope, intercept):
@@ -67,6 +69,8 @@ class ForceLine(object):
         intersection_time = numerator / denominator
         intersection_force = self.find_force(intersection_time)
         return ForcePoint(intersection_time, intersection_force)
+    def to_dict(self):
+        return {'slope': self.slope, 'intercept': self.intercept} 
 
 # compute the index in the time array when some value was surpassed
 def index_near(time, instant):
@@ -164,102 +168,110 @@ def elbow_r_squared(force, time, elbow_idx, widths, left_line, right_line):
         r_tv, r_dv = segment_variance(force, time,
                                 elbow_idx, elbow_idx + width, right_line)
         r2 = 1 - ((l_dv + r_dv) / (l_tv + r_tv))
-        # returns r squared as a percentage -350% is bad. 80% is good!
+        # returns r squared as a percentage. -350% is bad. 80% is good!
         r_squared.append(round((r2 * 100.), 1))
     return r_squared
 
-def trapq_move_to_dict(move):
-    return {'print_time': float(move.print_time),
-            'move_t': float(move.move_t),
-            'start_v': float(move.start_v),
-            'accel': float(move.accel),
-            'start_x': float(move.start_x),
-            'start_y': float(move.start_y),
-            'start_z': float(move.start_z),
-            'x_r': float(move.x_r),
-            'y_r': float(move.y_r),
-            'z_r': float(move.z_r)
+class TrapezoidalMove(object):
+    def __init__(self, move):
+        # copy c data to python memory
+        self.print_time = float(move.print_time)
+        self.move_t = float(move.move_t)
+        self.start_v = float(move.start_v)
+        self.accel = float(move.accel)
+        self.start_x = float(move.start_x)
+        self.start_y = float(move.start_y)
+        self.start_z = float(move.start_z)
+        self.x_r = float(move.x_r)
+        self.y_r = float(move.y_r)
+        self.z_r = float(move.z_r)
+    def to_dict(self):
+        return {'print_time': float(self.print_time),
+            'move_t': float(self.move_t),
+            'start_v': float(self.start_v),
+            'accel': float(self.accel),
+            'start_x': float(self.start_x),
+            'start_y': float(self.start_y),
+            'start_z': float(self.start_z),
+            'x_r': float(self.x_r),
+            'y_r': float(self.y_r),
+            'z_r': float(self.z_r)
         }
 
 #TODO: maybe discard points can scale with sample rate from 1 to 3
-DISCARD_POINTS = 3
+DEFAULT_DISCARD_POINTS = 3
 class TapAnalysis(object):
-    def __init__(self, printer, samples):
+    def __init__(self, printer, samples, discard=DEFAULT_DISCARD_POINTS):
         import numpy as np
-        self.printer = printer
-        self.trapq = printer.lookup_object('motion_report').trapqs['toolhead']
-        # TODO: tune this based on SPS and speed
-        self.discard = DISCARD_POINTS
+        self.discard = discard
         np_samples = np.array(samples)
         self.time = np_samples[:, 0]
         self.force = np_samples[:, 1]
-        self.moves = self.get_moves()
-        self.home_end_time = self.moves[2]['print_time']
-        self.pullback_start_time = self.moves[3]['print_time']
-        self.fix_homing_end()
-        self.pos = self.get_toolhead_positions()
+        sample_time = np.average(np.diff(self.time))
+        self.r_squared_widths = [int((n * 0.01) // sample_time) 
+                                 for n in range(2, 7)]
+        trapq = printer.lookup_object('motion_report').trapqs['toolhead']
+        self.moves = self._extract_trapq(trapq)
+        self._recalculate_homing_end()
+        self.home_end_time = self.moves[2].print_time
+        self.pullback_start_time = self.moves[3].print_time
+        self.position = self._extract_pos_history()
         self.is_valid = False
         self.tap_pos = None
         self.tap_points = None
         self.tap_lines = None
         self.tap_angles = None
         self.tap_r_squared = None
-    # build toolhead Z position for the time/force points
-    def get_toolhead_positions(self):
+    # build toolhead position history for the time/force graph
+    def _extract_pos_history(self):
         z_pos = []
         for time in self.time:
             z_pos.append(self.get_toolhead_position(time))
         return z_pos
     def get_toolhead_position(self, print_time):
         for i, move in enumerate(self.moves):
-            start_time = move['print_time']
+            start_time = move.print_time
             # time before first move, printer was stationary
             if i == 0 and print_time < start_time:
-                return (move['start_x'], move['start_y'], move['start_z'])
+                return (move.start_x, move.start_y, move.start_z)
             end_time = float('inf')
             if i < (len(self.moves) - 1):
-                end_time = self.moves[i + 1]['print_time']
+                end_time = self.moves[i + 1].print_time
             if print_time >= start_time and print_time < end_time:
                 # we have found the move
-                move_t = move['move_t']
+                move_t = move.move_t
                 move_time = max(0., 
-                        min(move_t, print_time - move['print_time']))
-                dist = ((move['start_v'] + .5 * move['accel'] * move_time)
+                        min(move_t, print_time - move.print_time))
+                dist = ((move.start_v + .5 * move.accel * move_time)
                             * move_time)
-                pos = ((move['start_x'] + move['x_r'] * dist,
-                        move['start_y'] + move['y_r'] * dist,
-                        move['start_z'] + move['z_r'] * dist))
+                pos = ((move.start_x + move.x_r * dist,
+                        move.start_y + move.y_r * dist,
+                        move.start_z + move.z_r * dist))
                 return pos
             else:
                 continue
         raise Exception("Move not found, thats impossible!")
     # adjust move_t of move 1 to match the toolhead position of move 2
-    def fix_homing_end(self):
+    def _recalculate_homing_end(self):
         # REVIEW: This takes some logical shortcuts, does it need to be more
         # generalized? e.g. to all 3 axes?
         homing_move = self.moves[1]
-        # acceleration should be 0!
-        accel = homing_move['accel']
+        halt_move = self.moves[2]
+        # acceleration should be 0! This is the 'coasting' move:
+        accel = homing_move.accel
         if (accel != 0.):
-            raise Exception('Unexpected acceleration in probing move')
-        start_v = homing_move['start_v']
-        start_z = homing_move['start_z']
-        end_z = self.moves[2]['start_z']
+            raise Exception('Unexpected acceleration in coasting move')
         # how long did it take to get to end_z?
-        move_t = abs((end_z - start_z) / start_v)
-        self.home_end_time = homing_move['print_time'] + move_t
-        self.moves[1]['move_t'] = move_t
-    def log_moves(self):
-        for i, move in enumerate(self.moves):
-            logging.info("Move %s: %s" % (i, move))
-    def get_moves(self):
-        moves, _ = self.trapq.extract_trapq(self.time[0], self.time[-1])
+        homing_move.move_t = abs((halt_move.start_z - homing_move.start_z)
+                                 / homing_move.start_v)
+    def _extract_trapq(self, trapq):
+        moves, _ = trapq.extract_trapq(self.time[0], self.time[-1])
         moves_out = []
         for move in moves:
-            moves_out.append(trapq_move_to_dict(move))
-        # it could be 5, in theory, but if it is, thats bad
+            moves_out.append(TrapezoidalMove(move))
+        # it could be 5, in theory, but if it is, thats a bad tap
         if (len(moves_out) != 6):
-            raise Exception("Expected 6 moves from trapq")
+            raise Exception("Expected tap to be 6 moves long")
         return moves_out
     def analyze(self):
         discard = self.discard
@@ -289,55 +301,40 @@ class TapAnalysis(object):
     # validate that a set of ForcePoint objects are in chronological order
     def validate_order(self):
         p = self.tap_points
-        return p[0].time < p[1].time < p[2].time < p[3].time
-    def calculate_angles(self):
-        l1, l2, l3, l4, l5 = self.tap_lines
-        return [l1.angle(l2), l2.angle(l3), l3.angle(l4), l4.angle(l5)]
-    # Validate that the rotations in the graph form a tap shape
+        return (p[0].time < p[1].time < p[2].time 
+                < p[3].time < p[4].time < p[5].time)
+    # Validate that the rotations between lines form a tap shape
     def validate_elbow_rotation(self):
         a1, a2, a3, a4 = self.tap_angles
         # with two polarities there are 2 valid tap shapes:
         return ((a1 > 0 and a2 < 0 and a3 < 0 and a4 > 0) or
                 (a1 < 0 and a2 > 0 and a3 > 0 and a4 < 0))
+    def calculate_angles(self):
+        l1, l2, l3, l4, l5 = self.tap_lines
+        return [l1.angle(l2), l2.angle(l3), l3.angle(l4), l4.angle(l5)]
     def calculate_r_squared(self):
-        import numpy as np
-        sample_time = np.average(np.diff(self.time))
-        widths = [int((n * 0.01) // sample_time) for n in range(2, 7)]
         r_squared = []
         for i, elbow in enumerate(self.tap_points[1 : -1]):
             elbow_idx = index_near(self.time, elbow.time)
-            logging.info("calculate r^2 for: %s, elbow_idx: %s, elbow_time: %s, time: [%s ... %s]" 
-                     % (i, elbow_idx, elbow.time, self.time[0], self.time[-1]))
             r_squared.append(elbow_r_squared(self.force, self.time, elbow_idx,
-                            widths, self.tap_lines[i], self.tap_lines[i + 1]))
+                            self.r_squared_widths,
+                            self.tap_lines[i], self.tap_lines[i + 1]))
         return r_squared
-    def get_tap_data(self):
-        tap_pos = None
-        if self.tap_pos is not None:
-            tap_pos = {'x': self.tap_pos[0],
-                        'y': self.tap_pos[1],
-                        'z': self.tap_pos[2],
-            }
+    # convert to dictionary for JSON encoder
+    def to_dict(self):
         return {
-            'graph': {
-                'time': self.time.tolist(),
-                'force': self.force.tolist(),
-                'position': None,
-            },
-            'points': [
-                {'time': point.time, 'force': point.force}
-                    for point in self.tap_points
-            ],
-            'lines': [
-                {'slope': line.slope, 'intercept': line.intercept} 
-                    for line in self.tap_lines
-            ],
-            'tap_pos': tap_pos,
+            'time': self.time.tolist(),
+            'force': self.force.tolist(),
+            'position': self.position,
+            'points': [point.to_dict() for point in self.tap_points],
+            'lines': [line.to_dict() for line in self.tap_lines],
+            'tap_pos': self.tap_pos,
+            'moves': [move.to_dict() for move in self.moves],
             'home_end_time': self.home_end_time,
             'pullback_start_time': self.pullback_start_time,
-            'angles': self.tap_angles,
-            'r_squared': self.tap_r_squared,
-            'is_valid': str(self.is_valid),
+            'tap_angles': self.tap_angles,
+            'tap_r_squared': self.tap_r_squared,
+            'is_valid': self.is_valid,
         }
 
 class LoadCellCommandHelper:
@@ -682,10 +679,9 @@ class LoadCellPrinterProbe(PrinterProbe):
         self.collector = None
         ppa = TapAnalysis(self.printer, samples)
         ppa.analyze()
-        tap_data = ppa.get_tap_data()
-        self.load_cell.send_endstop_event(tap_data)
+        self.load_cell.send_endstop_event(ppa.to_dict())
         if ppa.is_valid:
-            is_bad = self.bad_tap_module.is_bad_tap(tap_data)
+            is_bad = self.bad_tap_module.is_bad_tap(ppa)
             if not is_bad:
                 epos[2] = ppa.tap_pos[2]
                 self.gcode.respond_info("probe at %.3f,%.3f is z=%.6f"
