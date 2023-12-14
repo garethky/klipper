@@ -141,23 +141,31 @@ def tap_decompose(time, force, homing_end_idx, pullback_start_idx,
     end = ForcePoint(time[-1], l5.find_force(time[-1]))
     return [start, i1, i2, i3, i4, end], [l1, l2, l3, l4, l5]
 
+# calculate variance between a ForceLine and a region of force data
+def segment_variance(force, time, start, end, line):
+    import numpy as np
+    mean = np.average(force[start:end])
+    total_var = 0
+    delta_var = 0
+    for i in range(start, end):
+        load = force[i]
+        instant = time[i]
+        total_var += pow(load - mean, 2)
+        delta_var += pow(line.find_force(instant) - load, 2)
+    return (total_var, delta_var)
+
 # decide how well the ForceLines predict force near an elbow
 # bad predictions == blunt elbow, good predictions == sharp elbow
-def elbow_r_squared(force, elbow_idx, widths, left_line, right_line):
-    import numpy as np
+def elbow_r_squared(force, time, elbow_idx, widths, left_line, right_line):
     r_squared = []
     for width in widths:
-        predicted_force = []
-        start = elbow_idx - width
-        end = elbow_idx + width
-        local_force = force[start: end]
-        for i in range(start, end):
-            load = force[i]
-            line = left_line if i <= elbow_idx else right_line
-            predicted_force.append(line.find_force(line.find_time(load)))
-        corelation_matrix = np.corrcoef(local_force, predicted_force)
-        corr = corelation_matrix[0,1]
-        r_squared.append(corr ** 2)
+        l_tv, l_dv = segment_variance(force, time,
+                                elbow_idx - width, elbow_idx, left_line)
+        r_tv, r_dv = segment_variance(force, time,
+                                elbow_idx, elbow_idx + width, right_line)
+        r2 = 1 - ((l_dv + r_dv) / (l_tv + r_tv))
+        # returns r squared as a percentage -350% is bad. 80% is good!
+        r_squared.append(round((r2 * 100.), 1))
     return r_squared
 
 def trapq_move_to_dict(move):
@@ -294,18 +302,14 @@ class TapAnalysis(object):
     def calculate_r_squared(self):
         import numpy as np
         sample_time = np.average(np.diff(self.time))
-        
         widths = [int((n * 0.01) // sample_time) for n in range(2, 7)]
-        elbow_idx = index_near(self.time, self.tap_points[-2].time)
-        logging.info("avg sample time: %s, width: %s, time_length: %s, elbow_idx: %s" 
-                     % (sample_time, widths, len(self.time), elbow_idx))
         r_squared = []
         for i, elbow in enumerate(self.tap_points[1 : -1]):
             elbow_idx = index_near(self.time, elbow.time)
             logging.info("calculate r^2 for: %s, elbow_idx: %s, elbow_time: %s, time: [%s ... %s]" 
                      % (i, elbow_idx, elbow.time, self.time[0], self.time[-1]))
-            r_squared.append(elbow_r_squared(self.force, elbow_idx, widths,
-                                    self.tap_lines[i], self.tap_lines[i + 1]))
+            r_squared.append(elbow_r_squared(self.force, self.time, elbow_idx,
+                            widths, self.tap_lines[i], self.tap_lines[i + 1]))
         return r_squared
     def get_tap_data(self):
         tap_pos = None
@@ -620,9 +624,8 @@ class LoadCellPrinterProbe(PrinterProbe):
         self.pullback_speed = config.getfloat('pullback_speed'
                     , minval=0.01, maxval=1.0, default=default_pullback_speed)
         self.pullback_extra_time = config.getfloat('pullback_extra_time'
-                    , minval=0.00, maxval=1.0, default=0.2)
+                    , minval=0.00, maxval=1.0, default=0.3)
         self.pullback_distance = 0.1
-        self.pullback_speed = 400. * 0.001
         self.bad_tap_module = self.load_module(config
                             , 'bad_tap_module', BadTapModule())
         self.nozzle_cleaner_module = self.load_module(config
@@ -673,6 +676,7 @@ class LoadCellPrinterProbe(PrinterProbe):
                 reason += probe.HINT_TIMEOUT
             raise self.printer.command_error(reason)
         pullback_end_time = self.pullback_move()
+        pullback_end_pos = toolhead.get_position()
         samples = self.collector.collect_until(pullback_end_time 
                                                + self.pullback_extra_time)
         self.collector = None
@@ -686,8 +690,8 @@ class LoadCellPrinterProbe(PrinterProbe):
                 epos[2] = ppa.tap_pos[2]
                 self.gcode.respond_info("probe at %.3f,%.3f is z=%.6f"
                                 % (epos[0], epos[1], epos[2]))
-                return epos[:3]
-        return None
+                return epos[:3], pullback_end_pos[:3]
+        return None, pullback_end_pos[:3]
     def pullback_move(self):
         toolhead = self.printer.lookup_object('toolhead')
         pullback_pos = toolhead.get_position()
@@ -716,10 +720,10 @@ class LoadCellPrinterProbe(PrinterProbe):
         while len(positions) < sample_count:
             # Probe position
             logging.info("probe start")
-            pos = self._probe(speed)
+            probe_pos, halt_pos = self._probe(speed)
             logging.info("probe complete")
             # handle bad taps by cleaning and retry:
-            if pos is None:
+            if probe_pos is None:
                 if retries >= samples_retries:
                     raise gcmd.error("Probe had too many retries")
                 gcmd.respond_info("Bad tap detected. Cleaning Nozzle...")
@@ -728,7 +732,7 @@ class LoadCellPrinterProbe(PrinterProbe):
                 gcmd.respond_info("Retrying Probe...")
                 retries += 1
             else:
-                positions.append(pos)
+                positions.append(probe_pos)
                 # Check samples tolerance
                 z_positions = [p[2] for p in positions]
                 if max(z_positions) - min(z_positions) > samples_tolerance:
@@ -742,7 +746,8 @@ class LoadCellPrinterProbe(PrinterProbe):
             # Retract
             if len(positions) < sample_count:
                 logging.info("retract move start")
-                self._move(probexy + [pos[2] + sample_retract_dist],
+                start_from = halt_pos if probe_pos is None else probe_pos
+                self._move(probexy + [start_from[2] + sample_retract_dist],
                             lift_speed)
                 logging.info("retract move complete")
         if must_notify_multi_probe:
@@ -859,6 +864,7 @@ class LoadCell:
         toolhead = self.printer.lookup_object('toolhead')
         collector = self.get_collector()
         # collect and discard samples up to the end of the current
+        # TODO: make configurable
         settling_time = 0.375
         collector.collect_until(toolhead.get_last_move_time() + settling_time)
         # then collect the next n samples
