@@ -80,7 +80,6 @@ This chip supports CRC for sensor reading integrity and has a chip power cycle
 event flag so restarts of the chip can be detected. These are important safety
 features missing in the HX71x chips.
 
-#### [ads1263]
 ```
 [load_cell my_scale]
 sensor_type: ads1263
@@ -108,7 +107,7 @@ read ads1263.py.
 [load_cell_probe] wraps [load_cell] and turns it into a [probe]. Consult [probe]
 for the full list of options
 
-``````
+```
 [load_cell_probe]
 load_cell: load_cell my_scale
 # The complete name of a load cell printer object. Required.
