@@ -4,7 +4,7 @@ This document describes Klipper's support for load cells and load cell based
 probes.
 
 # Configuration Reference
-TODO: move this ot the Configuration Reference document
+TODO: move this to the Configuration Reference document
 
 ## [load_cell]
 A load_cell wraps a sensor and turns it into a digital scale.
@@ -28,8 +28,8 @@ The HX717 and HX711 are low cost 24 bit ADC chips that support2 channels and a
 limited number of gain settings. They only support bit bang communications and 
 the protocol is based on tight timing which requires turning off the interrupts 
 on the MCU (similar to the Neopixel chips). The HX711 is limited to 80 SPS and 
-the HX711 to 340SPS. Sample rate is selected by either supplying a voltage or 
-grounding on of the legs on the chip.
+the HX717 to 320SPS. Sample rate is selected by either supplying a voltage or 
+grounding one of the pins on the chip, so it cant be changed by klipper.
 
 ##### hx711
 ```
