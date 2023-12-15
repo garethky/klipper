@@ -113,7 +113,7 @@ load_cell: load_cell my_scale
 # The complete name of a load cell printer object. Required.
 #trigger_force_grams: 50.0
 #   The force that the probe will trigger at. 50g is the default.
-# trigger_count: 1
+#trigger_count: 1
 #   The number of samples over the trigger_force_grams threshold that will cause
 #   the probe to trigger
 #pullback_dist: 0.1
