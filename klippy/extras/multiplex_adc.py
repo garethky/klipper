@@ -13,7 +13,7 @@ from . import motion_report, adxl345
 
 # Interface for Multiplex ADC Sensors that want to supply high performance
 # ADC data from the MCU
-class MultiplexAdcSensor:
+class MultiplexAdcSensor(object):
     # get the MCU where the sensor is physically connected
     def get_mcu(self):
         pass

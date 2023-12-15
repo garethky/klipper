@@ -472,6 +472,3 @@ class ADS1263(multiplex_adc.MultiplexAdcSensor):
                     "(e.g. faulty wiring) or a faulty ads1263 chip." % (
                         reg, val_hex, stored_hex))
         return stored_val
-
-def load_config_prefix(config):
-    return multiplex_adc.MultiplexAdcSensorWrapper(config, ADS1263(config))
