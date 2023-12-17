@@ -93,8 +93,8 @@ def lstsq_line(x, y):
     mx, b = np.linalg.lstsq(x_stacked, y, rcond=None)[0]
     return ForceLine(mx, b)
 
-# Kneedle algorithm, finds min and max elbow points
-def find_kneedles(x, y):
+# Kneedle algorithm, finds absolute max elbow points
+def find_kneedle(x, y):
     import numpy as np
     x_coords = [x[0], x[-1]]
     y_coords = [y[0], y[-1]]
@@ -104,33 +104,46 @@ def find_kneedles(x, y):
     for time in x:
         fit_y.append(line.find_force(time))
     fit_y = np.asarray(fit_y)
-    delta_y = fit_y - y
-    max_i = np.argmax(delta_y)
-    min_i = np.argmin(delta_y)
-    # data may have either polarity, so the order is non deterministic
-    # always returns elbows in left-to-right order
-    return (min(max_i, min_i), max(max_i, min_i))
+    delta_y = np.absolute(fit_y - y)
+    return np.argmax(delta_y)
 
-# split a group of points into 3 lines using 2 junction points
-def split_to_lines(x, y, j1, j2, discard=0):
-    l1 = lstsq_line(x[0 + discard : j1 - discard],
-                    y[0 + discard : j1 - discard])
-    l2 = lstsq_line(x[j1 + discard : j2 - discard],
-                    y[j1 + discard : j2 - discard])
-    l3 = lstsq_line(x[j2 + discard : -1 - discard],
-                    y[j2 + discard : -1 - discard])
-    return (l1, l2, l3)
+def lstsq_error(x, y):
+    import numpy as np
+    x = np.asarray(x)
+    y = np.asarray(y)
+    x_stacked = np.vstack([x, np.ones(len(x))]).T
+    residual = np.linalg.lstsq(x_stacked, y, rcond=None)[1][0]
+    return residual
+
+def find_two_lines_best_fit(x, y, search_direction=-1):
+    sweep = range(2, len(x) - 2)
+    if (search_direction == -1):
+        sweep = reversed(sweep)
+    min_error = float('inf')
+    for i in sweep:
+        r1 = lstsq_error(x[0:i], y[0:i])
+        r2 = lstsq_error(x[i:], y[i:])
+        error = r1 + r2
+        if error < min_error:
+            min_error = error
+        else:
+            return i
+
+# split a group of points into 2 lines using 1 elbow point
+def split_to_lines(x, y, elbow_index, discard=[0, 0, 0, 0]):
+    l1 = lstsq_line(x[0 + discard[0] : elbow_index - discard[1]],
+                    y[0 + discard[0] : elbow_index - discard[1]])
+    l2 = lstsq_line(x[elbow_index + discard[2] : -1 - discard[3]],
+                    y[elbow_index + discard[2] : -1 - discard[3]])
+    return (l1, l2)
 
 # split a line into 3 parts by elbows. Return lines and intersection points
-def elbow_split(x, y, discard=0):
-    left_elbow_idx, right_elbow_idx = find_kneedles(x, y)
-    # try to leave all points in the middle segment
-    l1, l2, l3 = split_to_lines(x, y, left_elbow_idx - 1,
-                                right_elbow_idx + 1, discard)
-    i1 = l1.intersection(l2)
-    i2 = l2.intersection(l3)
+def elbow_split(x, y, discard=[0, 0, 0, 0]):
+    elbow_index = find_kneedle(x, y)
+    l1, l2 = split_to_lines(x, y, elbow_index, discard)
+    elbow_point = l1.intersection(l2)
     # return (line, point, line, point, line)
-    return l1, i1, l2, i2, l3
+    return l1, elbow_point, l2
 
 # break a tap event down into 6 points and 5 lines:
 #    *-----*|       /*-----*
@@ -138,19 +151,33 @@ def elbow_split(x, y, discard=0):
 #           *----*/
 def tap_decompose(time, force, homing_end_idx, pullback_start_idx,
                   discard=0):
-    start_x = time[0: pullback_start_idx - 1]
-    start_y = force[0: pullback_start_idx - 1]
-    # discard=0 because there are so few points in the probe line
-    l1, i1, l2, i2, l3 = elbow_split(start_x, start_y, 0)
-    start = ForcePoint(time[0], l1.find_force(time[0]))
-    homing_end_idx = index_near(time, i2.time) + discard
-    # the points after homing stop are very noisy, exclude 1/5th of them
+    default_discard = [discard, discard, discard, discard]
+    compression_discard = [discard, discard, 0, 0]
+    # compression elbow
+    start_time = time[0: homing_end_idx]
+    start_force = force[0: homing_end_idx]
+    # discard=0 because there are so few points in the compression line
+    # this technique works better there than kneedle when the probe is long
+    contact_elbow_idx = find_two_lines_best_fit(start_time, start_force, -1)
+    l1, l2 = split_to_lines(start_time, start_force, contact_elbow_idx,
+                            compression_discard)
+    p1 = l1.intersection(l2)
+    # pullback elbow
+    pullback_time = time[pullback_start_idx: -1]
+    pullback_force = force[pullback_start_idx: -1]
+    l4, p4, l5 = elbow_split(pullback_time, pullback_force, default_discard)
+    # dwell line:
+    # discard the first 1/5th of the line because it contains ringing
     dwell_start = homing_end_idx + ((pullback_start_idx - homing_end_idx) // 5)
-    end_x = time[dwell_start: -1]
-    end_y = force[dwell_start: -1]
-    _, i3, l4, i4, l5 = elbow_split(end_x, end_y, discard)
-    end = ForcePoint(time[-1], l5.find_force(time[-1]))
-    return [start, i1, i2, i3, i4, end], [l1, l2, l3, l4, l5]
+    dwell_time = time[dwell_start: pullback_start_idx]
+    dwell_force = force[dwell_start: pullback_start_idx]
+    l3 = lstsq_line(dwell_time, dwell_force)
+    # dwell line intersections:
+    p2 = l3.intersection(l2)
+    p3 = l3.intersection(l4)
+    p0 = ForcePoint(time[0], l1.find_force(time[0]))
+    p5 = ForcePoint(time[-1], l5.find_force(time[-1]))
+    return [p0, p1, p2, p3, p4, p5], [l1, l2, l3, l4, l5]
 
 # calculate variance between a ForceLine and a region of force data
 def segment_variance(force, time, start, end, line):
@@ -188,21 +215,20 @@ class TapAnalysis(object):
         np_samples = np.array(samples)
         self.time = np_samples[:, 0]
         self.force = np_samples[:, 1]
-        sample_time = np.average(np.diff(self.time))
-        self.r_squared_widths = [int((n * 0.01) // sample_time) 
+        self.sample_time = np.average(np.diff(self.time))
+        self.r_squared_widths = [int((n * 0.01) // self.sample_time)
                                  for n in range(2, 7)]
         trapq = printer.lookup_object('motion_report').trapqs['toolhead']
         self.moves = self._extract_trapq(trapq)
-        self._recalculate_homing_end()
-        self.home_end_time = self.moves[2].print_time
+        self.home_end_time = self._recalculate_homing_end()
         self.pullback_start_time = self.moves[3].print_time
         self.pullback_end_time = self.moves[5].print_time + self.moves[5].move_t
         self.position = self._extract_pos_history()
         self.is_valid = False
         self.tap_pos = None
-        self.tap_points = None
-        self.tap_lines = None
-        self.tap_angles = None
+        self.tap_points = []
+        self.tap_lines = []
+        self.tap_angles = []
         self.tap_r_squared = None
     # build toolhead position history for the time/force graph
     def _extract_pos_history(self):
@@ -246,6 +272,7 @@ class TapAnalysis(object):
         # how long did it take to get to end_z?
         homing_move.move_t = abs((halt_move.start_z - homing_move.start_z)
                                  / homing_move.start_v)
+        return homing_move.print_time + homing_move.move_t
     def _extract_trapq(self, trapq):
         moves, _ = trapq.extract_trapq(self.time[0], self.time[-1])
         moves_out = []
@@ -256,12 +283,31 @@ class TapAnalysis(object):
             raise Exception("Expected tap to be 6 moves long")
         return moves_out
     def analyze(self):
+        import numpy as np
         discard = self.discard
         force = self.force
         time = self.time
-        homing_end_index = index_near(time, self.home_end_time)
+        # find peak local maximum force after homing ends:
+        home_end_index = index_near(time, self.home_end_time)
         pullback_start_index = index_near(time, self.pullback_start_time)
-        points, lines = tap_decompose(time, force, homing_end_index,
+        # look forward for the next index where force decreases:
+        # REVIEW: On my printer it is always true that the calculated 
+        # home_end_time is before peak force. Could this not be true other
+        # printers?
+        max_force = abs(force[home_end_index])
+        peak_force_index = home_end_index
+        for i in range(home_end_index + 1, pullback_start_index):
+            next_force = abs(force[i])
+            if next_force > max_force:
+                max_force = next_force
+                peak_force_index += 1
+            else:
+                break
+        if not self.validate_peak_force(peak_force_index, home_end_index):
+           logging.info('Peak force not close to endstop trigger time')
+           return
+        pullback_start_index = index_near(time, self.pullback_start_time)
+        points, lines = tap_decompose(time, force, peak_force_index,
                             pullback_start_index, discard)
         self.tap_points = points
         self.tap_lines = lines
@@ -282,6 +328,11 @@ class TapAnalysis(object):
             return
         self.tap_r_squared = self.calculate_r_squared()
         self.is_valid = True
+    # validate peak force within 50ms of homing end
+    def validate_peak_force(self, peak_force_index, home_end_index):
+        delta = peak_force_index - home_end_index
+        delta_t = abs(self.sample_time * delta)
+        return delta <= 1 or delta_t < 0.05
     # validate that a set of ForcePoint objects are in chronological order
     def validate_order(self):
         p = self.tap_points
