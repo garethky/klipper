@@ -13,18 +13,21 @@ A load_cell wraps a sensor and turns it into a digital scale.
 [load_cell my_scale]
 sensor_type: hx717
 #   This must be the name of one of the supported sensor types
-counts_per_gram: 1
-#   This value converts raw sensor counts into grams.
-#   It is set with the CALIBRATE_LOAD_CELL command.
-#   The default is 1 as a safety measure.
-#   DO NOT COPY this value from another printers config.
+counts_per_gram: 1.12345
+#   The number of sensor counts that indicates 1 gram of force. This is
+#   calculated by the CALIBRATE_LOAD_CELL command. The default value is None.
+#   DO NOT copy this value from another printers config, run CALIBRATE_LOAD_CELL
+reference_tare_counts: 661806
+#   This is the tare value in raw sensor counts taken when CALIBRATE_LOAD_CELL
+#   is run. The default value is None.
+#   DO NOT copy this value from another printers config, run CALIBRATE_LOAD_CELL
 ```
 
 ### Sensor Support
-In development 3 sensors chips are supported: HX711, HX717 and ADS1263.
+Currently 2 sensors chips are supported: HX711 and HX717
 
 #### HX71x Chips
-The HX717 and HX711 are low cost 24 bit ADC chips that support2 channels and a
+The HX717 and HX711 are low cost 24 bit ADC chips that support 2 channels and a
 limited number of gain settings. They only support bit bang communications and 
 the protocol is based on tight timing which requires turning off the interrupts 
 on the MCU (similar to the Neopixel chips). The HX711 is limited to 80 SPS and 
@@ -77,49 +80,77 @@ for the full list of options
 [load_cell_probe]
 load_cell: load_cell my_scale
 # The complete name of a load cell printer object. Required.
-#trigger_force_grams: 50.0
+safety_limit_grams: 1000g
+#   The safe limit for probing force relative to the reference_tare_counts on
+#   the load_cell. The default is +/-1Kg.
+trigger_force_grams: 50.0
 #   The force that the probe will trigger at. 50g is the default.
-#trigger_count: 1
+continuous_tear_highpass: 0.8
+#   Enable optional continuous tearing while homing & probing to reject drift.
+#   The value is a frequency, in Hz, below which drift will be ignored.This
+#   option requires the SciPy library. Default: None
+continuous_tear_lowpass: 100.0
+#   The value is a frequency, in Hz, above which high frequency noise in the
+#   load cell will be igfiltered outnored. If this option is set,
+#   continuous_tear_highpass must also be set. Default: None
+continuous_tear_notch: 50, 60
+#   1 or 2 frequencies, in Hz, to filter out of the load cell data. This is
+#   intended to reject power line noise. If this option is set,
+#   continuous_tear_highpass must also be set. Default: None
+continuous_tear_notch_quality: 2.0
+#   Controls how narrow the range of frequencies are that the notch filter
+#   removes. Larger numbers produce a narrower filter. Minimum value is 0.5 and
+#   maximum is 3.0. Default: 2.0
+continuous_tear_trigger_force_grams: 40.0
+#   The force that the probe will trigger at whe using the continuous tearing
+#   filter. 40g is the default.
+tap_filter_notch: 60.0
+tap_filter_notch_quality: 2.0
+#   Filters the load cell data before the tap is evaluated. This option may
+#   provide marginal accuracy improvement when notch filtering at the mains
+#   power frequency. Requires SciPy. Default: None
+trigger_count: 1
 #   The number of samples over the trigger_force_grams threshold that will cause
-#   the probe to trigger
-#pullback_dist: 0.1
+#   the probe to trigger. 1 is the default.
+pullback_dist: 0.1
 #   The distance of the pullback move in mm. This move needs to be long enough 
 #   to bring the probe away from the bed after it makes contact.
-#pullback_speed: 0.4
+pullback_speed: 0.4
 #   Speed of the pullback move. The default value is to move at a speed of 1
 #   sample every 1 micron based one the sensors sample rate is.
-#settling_time: 0.375
+settling_time: 0.375
 #   Additional time to wait before taring the probe. This allows any vibrations
 #   to settle and bowden tubes time to flex etc. This improves repeatability.
-#pullback_extra_time: 0.3
+#   If the continuous_tear_filter is used this may be set to 0.
+pullback_extra_time: 0.3
 #   Time to collect additional samples after the pullback move ends in seconds.
 #   This improves accuracy by giving the algorithm more points after the probe
 #   breaks contact with the bed. Disabling this entirely may impact reliability.
-#tare_count: 16
+tare_count: 16
 #   The number of samples to use when automatically taring the load_cell before
 #   each probe. The default value is: sample_per_second * (1 / 60) * 4. This
 #   collects samples from 4 cycles of 60Hz mains power to cancel power line
 #   noise.
-#bad_tap_module:
+bad_tap_module:
 #   Name of a printer object that implements the BadTapModule interface. This
 #   checks taps to see if they meet minimum requirements and can
-#nozzle_cleaner_module:
+nozzle_cleaner_module:
 #   Name of a printer object that implements the NozzleCleanerModule interface
 #   than can handle nozzle cleaning. If one is provided the nozzle_cleaner_gcode
 #   is disabled.
-#nozzle_cleaner_gcode:
+nozzle_cleaner_gcode:
 #   A Gcode macro that is called when a bad tap is detected and the nozzle needs
 #   to be cleaned. The default Gcode prints a warning to the console.
-z_offset
-#speed: 5.0
-#samples: 1
-#sample_retract_dist: 2.0
-#lift_speed:
-#samples_result: average
-#samples_tolerance: 0.100
-#samples_tolerance_retries: 0
-#activate_gcode:
-#deactivate_gcode:
+z_offset:
+speed:
+samples:
+sample_retract_dist:
+lift_speed:
+samples_result:
+samples_tolerance:
+samples_tolerance_retries:
+activate_gcode:
+deactivate_gcode:
 #   See the "probe" section for a description of the above parameters.
 ```
 

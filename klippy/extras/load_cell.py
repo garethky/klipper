@@ -68,7 +68,7 @@ class LoadCellCommandHelper:
         tare_counts = self.load_cell.avg_counts()
         tare_percent = self.load_cell.counts_to_percent(tare_counts)
         self.load_cell.tare(tare_counts)
-        gcmd.respond_info("Load cell tare value: %.2f%% (%i)" 
+        gcmd.respond_info("Load cell tare value: %.2f%% (%i)"
                           % (tare_percent, tare_counts))
     cmd_CALIBRATE_LOAD_CELL_help = "Start interactive calibration tool"
     def cmd_CALIBRATE_LOAD_CELL(self, gcmd):
@@ -157,11 +157,15 @@ class LoadCellGuidedCalibrationHelper:
         if self._counts_per_gram is None or self._tare_counts is None:
             self.gcode.respond_info("Calibration process is incomplete, "
                                      "aborting")
+        self.load_cell.set_calibration(self._counts_per_gram
+                                       , self._tare_counts)
+        self.gcode.respond_info("Load cell calibration settings:\n\n"
+            "counts_per_gram: %.6f\n"
+            "reference_tare_counts: %i\n\n"
+            "The SAVE_CONFIG command will update the printer config file"
+            " with the above and restart the printer."
+            % (self._counts_per_gram, self._tare_counts))
         self.load_cell.tare(self._tare_counts)
-        self.load_cell.set_counts_per_gram(self._counts_per_gram)
-        self.gcode.respond_info("Load cell calibrated, counts per gram: %.6f\n"
-            "The SAVE_CONFIG command will update the printer config file "
-            "with the above and restart the printer." % (self._counts_per_gram))
     cmd_ABORT_help = "Abort load cell calibration tool"
     def cmd_ABORT(self, gcmd):
         self.finalize(False)
@@ -173,7 +177,7 @@ class LoadCellGuidedCalibrationHelper:
         self._tare_counts = self._avg_counts()
         self._counts_per_gram = None  #require re-calibration on tare
         self.tare_percent = self.load_cell.counts_to_percent(self._tare_counts)
-        gcmd.respond_info("Load cell tare value: %.2f%% (%i)" 
+        gcmd.respond_info("Load cell tare value: %.2f%% (%i)"
                           % (self.tare_percent, self._tare_counts))
         if self.tare_percent > 2.:
             gcmd.respond_info(
@@ -296,7 +300,6 @@ class LoadCellSampleCollector():
 # Printer class that controls the load cell
 class LoadCell:
     def __init__(self, config):
-        logging.info('in LoadCell constructor!')
         try:
             import numpy
         except Exception:
@@ -311,14 +314,17 @@ class LoadCell:
                 }
         sensor_type = config.getchoice('sensor_type', {s: s for s in sensors})
         sensor = sensors[sensor_type](config)
-        self.sensor = multiplex_adc.MultiplexAdcSensorWrapper(config, sensor)        
         # sensor must implement LoadCellDataSource
-        self.tare_counts = None
+        self.sensor = multiplex_adc.MultiplexAdcSensorWrapper(config, sensor)
         self.trailing_counts = collections.deque(maxlen=24)
         self.is_in_use = False
         self.in_use_print_time = 0
-        self.counts_per_gram = config.getfloat('counts_per_gram', minval=1.
-                                            , default=None)
+        self.reference_tare_counts = config.getint('reference_tare_counts'
+                                                   , default=None)
+        self.tare_counts = self.reference_tare_counts
+        self.min_counts_per_gram = 1.
+        self.counts_per_gram = config.getfloat('counts_per_gram'
+                                , minval=self.min_counts_per_gram, default=None)
         LoadCellCommandHelper(config, self)
         # webhooks support
         self.api_dump = WebhooksApiDumpRepeater(printer, "load_cell/dump_force",
@@ -328,14 +334,22 @@ class LoadCell:
         printer.register_event_handler("klippy:ready", self._handle_ready)
     def _handle_ready(self):
         self.sensor_client = self.sensor.subscribe(self._sensor_data_event)
+        # announce calibration status on ready
+        if self.is_calibrated():
+            self.printer.send_event("load_cell:calibrate", self)
+        if self.is_tared():
+            self.printer.send_event("load_cell:tare", self)
     # convert raw counts to grams and broadcast to clients
     def _sensor_data_event(self, data):
         if not data.get("params", {}).get("samples"):
             return
-        samples = []        
+        samples = []
         for row in data["params"]["samples"]:
-            # [time, grams, counts]
-            samples.append([row[0], self.counts_to_grams(row[1]), row[1]])
+            # [time, grams, counts, tare_counts]
+            samples.append([row[0],
+                            self.counts_to_grams(row[1]),
+                            row[1],
+                            self.counts_to_grams(self.tare_counts)])
         self.api_dump.send({'samples': samples})
     # get internal events of force data
     def subscribe(self, callback):
@@ -343,13 +357,20 @@ class LoadCell:
         self.api_dump.add_client(multiplex_adc.WebRequestShim(client))
         return client
     def tare(self, tare_counts):
-        self.tare_counts = tare_counts
-    def set_counts_per_gram(self, counts_per_gram):
-        if counts_per_gram is None or abs(counts_per_gram) < 1.:
+        self.tare_counts = int(tare_counts)
+        self.printer.send_event("load_cell:tare", self)
+    def set_calibration(self, counts_per_gram, tare_counts):
+        if (counts_per_gram is None
+                or abs(counts_per_gram) < self.min_counts_per_gram):
             raise self.printer.command_error("Invalid counts per gram value")
+        if (tare_counts is None):
+            raise self.printer.command_error("Missing tare counts")
         self.counts_per_gram = abs(counts_per_gram)
+        self.reference_tare_counts = int(tare_counts)
         configfile = self.printer.lookup_object('configfile')
         configfile.set(self.name, 'counts_per_gram', "%.5f" % (counts_per_gram))
+        configfile.set(self.name, 'tare_counts', "%.5f" % (tare_counts))
+        self.printer.send_event("load_cell:calibrate", self)
     def counts_to_grams(self, sample):
         if not self.is_calibrated() or not self.is_tared():
             return None
@@ -376,15 +397,18 @@ class LoadCell:
                 raise SaturationException(
                     "Some samples are saturated (+/-100%)")
         counts = np.asarray(samples)[:, 2].astype(float)
-        return np.average(counts)    
+        return np.average(counts)
     def is_tared(self):
         return self.tare_counts is not None
     def is_calibrated(self):
-        return self.counts_per_gram is not None
+        return (self.counts_per_gram is not None
+                and self.reference_tare_counts is not None)
     def get_sensor(self):
         return self.sensor
     def get_bits(self):
         return self.sensor.sensor.get_bits()
+    def get_reference_tare_counts(self):
+        return self.reference_tare_counts
     def get_tare_counts(self):
         return self.tare_counts
     def get_counts_per_gram(self):
@@ -393,9 +417,9 @@ class LoadCell:
         return LoadCellSampleCollector(self, self.printer.get_reactor())
     def get_status(self, eventtime):
         return {'is_calibrated': self.is_calibrated()
-                , 'tare_counts': self.tare_counts
+                , 'reference_tare_counts': self.reference_tare_counts
                 , 'counts_per_gram': self.counts_per_gram
-                }
+                , 'tare_counts': self.tare_counts }
 
 def load_config_prefix(config):
     return LoadCell(config)

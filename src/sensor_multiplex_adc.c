@@ -94,7 +94,7 @@ add_adc_data(struct mux_adc *mux_adc)
 }
 
 // use the contents of the sample container to report
-static void 
+static void
 add_sensor_result(struct mux_adc *mux_adc) {
     if (mux_adc->sample.sample_not_ready) {
         return;
@@ -132,7 +132,7 @@ read_sensor(struct mux_adc *mux_adc) {
             return;
         }
         else if (mux_adc->sensor_type == SENSOR_MULTI_HX71X) {
-            struct multi_hx71x_sensor *hx = 
+            struct multi_hx71x_sensor *hx =
                     multi_hx71x_oid_lookup(mux_adc->sensor_oid);
             multi_hx71x_query(hx, &mux_adc->sample);
             return;
@@ -165,7 +165,8 @@ command_config_multiplex_adc(uint32_t *args)
     uint8_t lc_endstop_oid = args[3];
     // optional endstop
     if (lc_endstop_oid != 0) {
-        mux_adc->load_cell_endstop = load_cell_endstop_oid_lookup(lc_endstop_oid);
+        mux_adc->load_cell_endstop =
+                            load_cell_endstop_oid_lookup(lc_endstop_oid);
     }
 }
 DECL_COMMAND(command_config_multiplex_adc, "config_multiplex_adc oid=%c"
