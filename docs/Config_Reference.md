@@ -1240,7 +1240,9 @@ the nature of skew correction these lengths are set via gcode. See
 Temperature-dependant toolhead Z position adjustment. Compensate for vertical
 toolhead movement caused by thermal expansion of the printer's frame in
 real-time using a temperature sensor (typically coupled to a vertical section
-of frame).
+of frame). Multiple sections may be defined as [z_thermal_adjust component] to
+compensate for thermal expansion in different printer components, such as the
+hotend, heatbreak and frame.
 
 See also: [extended g-code commands](G-Codes.md#z_thermal_adjust).
 
@@ -1262,6 +1264,10 @@ See also: [extended g-code commands](G-Codes.md#z_thermal_adjust).
 #max_z_adjustment:
 #   Maximum absolute adjustment that can be applied to the Z axis [mm]. The
 #   default is 99999999.0 mm (unlimited).
+#sensor:
+#   Name of a single temperature sensor to use as a temperature source. E.g.
+#   'temperature_sensor frame', 'extruder', 'heater_bed' etc. If this option
+#   is used the other sensor options are not used. 
 #sensor_type:
 #sensor_pin:
 #min_temp:
