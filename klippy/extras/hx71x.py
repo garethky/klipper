@@ -71,6 +71,9 @@ class HX71xBase(BulkSensorAdc, LoadCellEndstopSensor):
         # Samples per second choices
         self.sps = config.getchoice('sample_rate', sample_rate_options,
                                     default=default_sample_rate)
+        # set rest_ticks as a % of the sample_rate
+        self.duty_cycle = config.getfloat('duty_cycle',
+                                          minval=0.5, maxval=1.0, default=0.7)
         # gain/channel choices
         self.gain_channel = int(config.getchoice('gain', gain_options,
                                                  default=default_gain))
@@ -118,7 +121,6 @@ class HX71xBase(BulkSensorAdc, LoadCellEndstopSensor):
             "query_hx71x oid=%c rest_ticks=%u")
         self.clock_updater.setup_query_command(self.mcu,
             "query_hx71x_status oid=%c", self.oid)
-        self.mcu.register_response(self._handle_reset, "reset_hx71x", self.oid)
     def get_mcu(self):
         return self.mcu
     def get_samples_per_second(self):
@@ -156,16 +158,16 @@ class HX71xBase(BulkSensorAdc, LoadCellEndstopSensor):
     def _start_measurements(self):
         # Start bulk reading
         self.bulk_queue.clear_samples()
-        rest_ticks = self.mcu.seconds_to_clock(0.7 / self.sps)
+        rest_ticks = self.mcu.seconds_to_clock(self.duty_cycle / self.sps)
         self.query_hx71x_cmd.send([self.oid, rest_ticks])
-        logging.info("HX71x starting '%s' measurements", self.name)
+        logging.info("HX71x '%s' starting measurements", self.name)
         # Initialize clock tracking
         self.clock_updater.note_start()
     def _finish_measurements(self):
         # Halt bulk reading
         self.query_hx71x_cmd.send_wait_ack([self.oid, 0])
         self.bulk_queue.clear_samples()
-        logging.info("HX71x finished '%s' measurements", self.name)
+        logging.info("HX71x '%s' finished measurements", self.name)
     def _handle_reset(self):
         # HX71x suffered a reboot or timing error, chip was shut down on MCU
         logging.error("HX71x chip '%s' reset", self.name)

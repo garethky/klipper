@@ -133,6 +133,9 @@ class LoadCellCommandHelper:
         collector.start_collecting()
         reactor.pause(reactor.monotonic() + 10.)
         samples = collector.stop_collecting()
+        if len(samples) == 0:
+            gcmd.error("No samples received")
+            return
         counts = np.asarray(samples)[:, 2].astype(int)
         range_min, range_max = self.load_cell.saturation_range()
         good_count = 0

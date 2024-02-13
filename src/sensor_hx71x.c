@@ -233,21 +233,25 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
     hx71x_time_t time_diff = timer_read_time() - start_time;
     if (time_diff >= hx71x->rest_ticks) {
         // some IRQ delayed this read so much that the chips must be reset
-        hx71x_reset(hx71x, oid);
-        return;
+        // reads that take this long cant be trusted to yield bits from the same reading.
+        output("HX71x read took too long: %u > %u", time_diff, hx71x->rest_ticks);
+        //hx71x_reset(hx71x, oid);
+        //return;
     }
 
     int32_t total_counts = 0;
     for (i = 0; i < hx71x->chip_count; i++) {
+        // dout should be 1, which indacates sample not ready
+        // if its 0, that probably means the chip got hit with ESD
+        if (!gpio_in_read(hx71x->dout[i])) {
+            output("HX71x dout pin is 0 on sensor: %u ", i);
+        }
         // extend 2's complement 24 bits to 32bits
         if (counts[i] >= 0x800000) {
             counts[i] |= 0xFF000000;
         }
-        if (!gpio_in_read(hx71x->dout[i]) || counts[i] < -0x7FFFFF
-                || counts[i] > 0x7FFFFF) {
-            // something went wrong with the read, reset chips
-            hx71x_reset(hx71x, oid);
-            return;
+        if (counts[i] < -0x7FFFFF || counts[i] > 0x7FFFFF) {
+            output("HX71x value out of 24 bit range: %i ", counts[i]);
         }
         total_counts += counts[i];
         add_sample(hx71x, counts[i]);
