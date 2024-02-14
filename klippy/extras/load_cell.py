@@ -136,6 +136,7 @@ class LoadCellCommandHelper:
         if len(samples) == 0:
             gcmd.error("No samples received")
             return
+        logging.info("Raw Samples: %s" % (samples,))
         counts = np.asarray(samples)[:, 2].astype(int)
         range_min, range_max = self.load_cell.saturation_range()
         good_count = 0
