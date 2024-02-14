@@ -69,6 +69,22 @@ hx71x_get_time(void)
 #define hx71x_delay_no_irq(start, ticks) (void)(ticks)
 #define hx71x_delay(start, ticks) (void)(ticks)
 
+/*
+ * //Turn off delays for GD32 chips because they are slow like AVR
+ * #elif CONFIG_MACH_GD32
+ * 
+ * // GD32 uses standard timer_read_time()
+ * static hx71x_time_t
+ * hx71x_get_time(void)
+ * {
+ *     return timer_read_time();
+ * }
+ * 
+ * // these chips are too slow to use delays
+ * #define hx71x_delay_no_irq(start, ticks) (void)(ticks)
+ * #define hx71x_delay(start, ticks) (void)(ticks)
+ */
+
 #else
 
 static hx71x_time_t
@@ -133,7 +149,9 @@ hx71x_reschedule_timer(struct hx71x_adc *hx71x)
 {
     irq_disable();
     set_flag(FLAG_PENDING, hx71x);
-    hx71x->timer.waketime = timer_read_time() + hx71x->rest_ticks;
+    //hx71x->timer.waketime += timer_read_time() + hx71x->rest_ticks;
+    // suspect timer_read_time() may not work correctly on GD32:
+    hx71x->timer.waketime += hx71x->rest_ticks;
     sched_add_timer(&hx71x->timer);
     irq_enable();
 }
@@ -293,6 +311,7 @@ command_config_hx71x(uint32_t *args)
     for (uint8_t chip_idx = 0; chip_idx < chip_count; chip_idx++) {
         hx71x->dout[chip_idx] = gpio_in_setup(args[arg_idx], -1);
         hx71x->sclk[chip_idx] = gpio_out_setup(args[arg_idx + 1], 0);
+        gpio_out_write(hx71x->sclk[chip_idx], 0);
         arg_idx += 2;
     }
 }
@@ -317,9 +336,11 @@ command_query_hx71x(uint32_t *args)
     // Start new measurements
     sensor_bulk_reset(&hx71x->sb);
     // Put all chips in run mode, in case they were reset
+    irq_disable();
     for (uint_fast8_t i = 0; i < hx71x->chip_count; i++) {
         gpio_out_write(hx71x->sclk[i], 0);
     }
+    irq_enable();
     hx71x_reschedule_timer(hx71x);
 }
 DECL_COMMAND(command_query_hx71x,
