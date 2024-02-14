@@ -69,21 +69,20 @@ hx71x_get_time(void)
 #define hx71x_delay_no_irq(start, ticks) (void)(ticks)
 #define hx71x_delay(start, ticks) (void)(ticks)
 
-/*
- * //Turn off delays for GD32 chips because they are slow like AVR
- * #elif CONFIG_MACH_GD32
- * 
- * // GD32 uses standard timer_read_time()
- * static hx71x_time_t
- * hx71x_get_time(void)
- * {
- *     return timer_read_time();
- * }
- * 
- * // these chips are too slow to use delays
- * #define hx71x_delay_no_irq(start, ticks) (void)(ticks)
- * #define hx71x_delay(start, ticks) (void)(ticks)
- */
+// Turn off delays for GD32 chips because their 16 bit timer is not
+// compatible with long delays
+#elif CONFIG_MACH_GD32
+
+// GD32 uses standard timer_read_time()
+static hx71x_time_t
+hx71x_get_time(void)
+{
+    return timer_read_time();
+}
+
+// these chips are too slow to use delays
+#define hx71x_delay_no_irq(start, ticks) (void)(ticks)
+#define hx71x_delay(start, ticks) (void)(ticks)
 
 #else
 
@@ -228,7 +227,7 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
 
     // data is ready
     int32_t counts[4] = {0, 0, 0, 0};
-    hx71x_time_t start_time = timer_read_time();
+    hx71x_time_t start_time = hx71x_get_time();
     uint_fast8_t i;
     for (uint_fast8_t sample_idx = 0; sample_idx < 24; sample_idx++) {
         hx71x_pulse_clocks(hx71x);
@@ -248,7 +247,7 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
         //}
     }
 
-    hx71x_time_t time_diff = timer_read_time() - start_time;
+    hx71x_time_t time_diff = hx71x_get_time() - start_time;
     if (time_diff >= hx71x->rest_ticks) {
         // some IRQ delayed this read so much that the chips must be reset
         // reads that take this long cant be trusted to yield bits from the same reading.
@@ -351,14 +350,14 @@ command_query_hx71x_status(const uint32_t *args)
 {
     uint8_t oid = args[0];
     struct hx71x_adc *hx71x = oid_lookup(oid, command_config_hx71x);
-    const uint32_t start_t = timer_read_time();
+    const hx71x_time_t start_t = hx71x_get_time();
     const uint8_t reset_required = is_flag_set(FLAG_RESET_REQUIRED, hx71x);
     uint8_t pending_bytes = 0;
     if (!reset_required) {
         pending_bytes = hx71x_is_data_ready(hx71x);
         pending_bytes *= (BYTES_PER_SAMPLE * hx71x->chip_count);
     }
-    const uint32_t end_t = timer_read_time();
+    const hx71x_time_t end_t = hx71x_get_time();
     sensor_bulk_status(&hx71x->sb, oid, start_t, (end_t - start_t)
                       , pending_bytes);
 }

@@ -73,7 +73,7 @@ class HX71xBase(BulkSensorAdc, LoadCellEndstopSensor):
                                     default=default_sample_rate)
         # set rest_ticks as a % of the sample_rate
         self.duty_cycle = config.getfloat('duty_cycle',
-                                          minval=0.5, maxval=1.0, default=0.7)
+                                          minval=0.1, maxval=1.0, default=0.7)
         # gain/channel choices
         self.gain_channel = int(config.getchoice('gain', gain_options,
                                                  default=default_gain))
