@@ -91,7 +91,7 @@ class HX71xBase(BulkSensorAdc, LoadCellEndstopSensor):
         chip_smooth = self.sps * UPDATE_INTERVAL * 2
         self.clock_sync = bulk_sensor.ClockSyncRegression(self.mcu, chip_smooth)
         self.clock_updater = bulk_sensor.ChipClockUpdater(self.clock_sync,
-                                                          BYTES_PER_SAMPLE)
+                                                          self.bytes_per_block)
         # Process messages in batches
         self.batch_bulk = bulk_sensor.BatchBulkHelper(
             self.printer, self._process_batch, self._start_measurements,
