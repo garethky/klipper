@@ -42,6 +42,7 @@ static struct task_wake wake_hx71x;
 
 typedef unsigned int hx71x_time_t;
 
+/*
 static hx71x_time_t
 nsecs_to_ticks(uint32_t ns)
 {
@@ -54,25 +55,10 @@ hx71x_check_elapsed(hx71x_time_t t1, hx71x_time_t t2
 {
     return t2 - t1 >= ticks;
 }
-
-// The AVR micro-controllers require specialized timing
-#if CONFIG_MACH_AVR
-
-#include <avr/interrupt.h> // TCNT1
-
-static hx71x_time_t
-hx71x_get_time(void)
-{
-    return TCNT1;
-}
-
-#define hx71x_delay_no_irq(start, ticks) (void)(ticks)
-#define hx71x_delay(start, ticks) (void)(ticks)
+*/
 
 // Turn off delays for GD32 chips because their 16 bit timer is not
 // compatible with long delays
-#elif CONFIG_MACH_GD32
-
 // GD32 uses standard timer_read_time()
 static hx71x_time_t
 hx71x_get_time(void)
@@ -81,17 +67,9 @@ hx71x_get_time(void)
 }
 
 // these chips are too slow to use delays
-#define hx71x_delay_no_irq(start, ticks) (void)(ticks)
-#define hx71x_delay(start, ticks) (void)(ticks)
-
-#else
-
-static hx71x_time_t
-hx71x_get_time(void)
-{
-    return timer_read_time();
-}
-
+// #define hx71x_delay_no_irq(start, ticks) (void)(ticks)
+//#define hx71x_delay(start, ticks) (void)(ticks)
+/*
 static inline void
 hx71x_delay_no_irq(hx71x_time_t start, hx71x_time_t ticks)
 {
@@ -105,14 +83,14 @@ hx71x_delay(hx71x_time_t start, hx71x_time_t ticks)
     while (!hx71x_check_elapsed(start, hx71x_get_time(), ticks))
         irq_poll();
 }
+*/
 
-#endif
 
 /****************************************************************
  * HX711 and HX717 Sensor Support
  ****************************************************************/
 // both HX717 and HX711 have 200ns min pulse time for clock pin on/off
-#define MIN_PULSE_TIME nsecs_to_ticks(200)
+//#define MIN_PULSE_TIME nsecs_to_ticks(200)
 
 static inline uint8_t
 is_flag_set(const uint8_t mask, struct hx71x_adc *hx71x)
@@ -150,7 +128,7 @@ hx71x_reschedule_timer(struct hx71x_adc *hx71x)
     set_flag(FLAG_PENDING, hx71x);
     //hx71x->timer.waketime += timer_read_time() + hx71x->rest_ticks;
     // suspect timer_read_time() may not work correctly on GD32:
-    hx71x->timer.waketime += hx71x->rest_ticks;
+    hx71x->timer.waketime = hx71x_get_time() + hx71x->rest_ticks;
     sched_add_timer(&hx71x->timer);
     irq_enable();
 }
@@ -203,17 +181,17 @@ flush_samples(struct hx71x_adc *hx71x, uint8_t oid)
 // Pulse all clock pins to move to the next bit
 inline static void
 hx71x_pulse_clocks(struct hx71x_adc *hx71x) {
-    irq_disable();
+    //irq_disable();
     uint_fast8_t i;
-    hx71x_time_t start_time = hx71x_get_time();
+    //hx71x_time_t start_time = hx71x_get_time();
     for (i = 0; i < hx71x->chip_count; i++) {
         gpio_out_write(hx71x->sclk[i], 1);
     }
-    hx71x_delay_no_irq(start_time, MIN_PULSE_TIME);
+    //hx71x_delay_no_irq(start_time, MIN_PULSE_TIME);
     for (i = 0; i < hx71x->chip_count; i++) {
         gpio_out_write(hx71x->sclk[i], 0);
     }
-    irq_enable();
+    //irq_enable();
 }
 
 // hx71x ADC query
@@ -231,7 +209,7 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
     uint_fast8_t i;
     for (uint_fast8_t sample_idx = 0; sample_idx < 24; sample_idx++) {
         hx71x_pulse_clocks(hx71x);
-        hx71x_delay(hx71x_get_time(), MIN_PULSE_TIME);
+        //hx71x_delay(hx71x_get_time(), MIN_PULSE_TIME);
         // read 2's compliment int bits
         for (i = 0; i < hx71x->chip_count; i++) {
             counts[i] = (counts[i] << 1) | gpio_in_read(hx71x->dout[i]);
@@ -243,7 +221,7 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
         hx71x_pulse_clocks(hx71x);
         // test if this delay is causing bad reads?
         //if (gain_idx < hx71x->gain_channel - 1) {
-        hx71x_delay(hx71x_get_time(), MIN_PULSE_TIME);
+        //hx71x_delay(hx71x_get_time(), MIN_PULSE_TIME);
         //}
     }
 
@@ -335,11 +313,11 @@ command_query_hx71x(uint32_t *args)
     // Start new measurements
     sensor_bulk_reset(&hx71x->sb);
     // Put all chips in run mode, in case they were reset
-    irq_disable();
+    //irq_disable();
     for (uint_fast8_t i = 0; i < hx71x->chip_count; i++) {
         gpio_out_write(hx71x->sclk[i], 0);
     }
-    irq_enable();
+    //irq_enable();
     hx71x_reschedule_timer(hx71x);
 }
 DECL_COMMAND(command_query_hx71x,
