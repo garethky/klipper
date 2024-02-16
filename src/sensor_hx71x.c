@@ -198,14 +198,17 @@ hx71x_pulse_clocks(struct hx71x_adc *hx71x) {
 void
 hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
 {
+    hx71x_time_t start_time = hx71x_get_time();
     if (!hx71x_is_data_ready(hx71x)) {
         hx71x_reschedule_timer(hx71x);
+        hx71x_time_t end_time = hx71x_get_time();
+        hx71x_time_t time_diff = end_time - start_time;
+        output("HX71x Timing: Read: False, t_start: %u, t_end: %u, t_diff: %u", start_time, end_time, time_diff);
         return;
     }
 
     // data is ready
     int32_t counts[4] = {0, 0, 0, 0};
-    hx71x_time_t start_time = hx71x_get_time();
     uint_fast8_t i;
     for (uint_fast8_t sample_idx = 0; sample_idx < 24; sample_idx++) {
         hx71x_pulse_clocks(hx71x);
@@ -259,6 +262,9 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
 
     flush_samples(hx71x, oid);
     hx71x_reschedule_timer(hx71x);
+    hx71x_time_t end_time = hx71x_get_time();
+    time_diff = end_time - start_time;
+    output("HX71x Timing: Read: True, t_start: %u, t_end: %u, t_diff: %u", start_time, end_time, time_diff);
 }
 
 // Create a hx71x sensor
