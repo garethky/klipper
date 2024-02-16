@@ -228,11 +228,12 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
         //}
     }
 
-    hx71x_time_t time_diff = hx71x_get_time() - start_time;
+    hx71x_time_t end_time = hx71x_get_time();
+    hx71x_time_t time_diff = end_time - start_time;
     if (time_diff >= hx71x->rest_ticks) {
         // some IRQ delayed this read so much that the chips must be reset
         // reads that take this long cant be trusted to yield bits from the same reading.
-        output("HX71x read took too long: %u > %u", time_diff, hx71x->rest_ticks);
+        output("HX71x read took too long: Read: True, t_start: %u, t_end: %u, t_diff: %u", start_time, end_time, time_diff);
         //hx71x_reset(hx71x, oid);
         //return;
     }
@@ -262,7 +263,7 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
 
     flush_samples(hx71x, oid);
     hx71x_reschedule_timer(hx71x);
-    hx71x_time_t end_time = hx71x_get_time();
+    end_time = hx71x_get_time();
     time_diff = end_time - start_time;
     output("HX71x Timing: Read: True, t_start: %u, t_end: %u, t_diff: %u", start_time, end_time, time_diff);
 }
