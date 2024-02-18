@@ -53,6 +53,12 @@ static inline int
 hx71x_check_elapsed(hx71x_time_t t1, hx71x_time_t t2
                        , hx71x_time_t ticks)
 {
+    // if the timer gives incoherant results stop waiting immediatly
+    if (t1 > t2) {
+        output("HX71x delay aborted: t1: %u, t1: %u, t_diff: %u", t1, t1, t1 - t1);
+        return 1;
+    }
+
     return t2 - t1 >= ticks;
 }
 
