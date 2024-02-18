@@ -186,10 +186,12 @@ hx71x_pulse_clocks(struct hx71x_adc *hx71x) {
     //hx71x_time_t start_time = hx71x_get_time();
     for (i = 0; i < hx71x->chip_count; i++) {
         gpio_out_write(hx71x->sclk[i], 1);
+        irq_poll();
     }
     //hx71x_delay_no_irq(start_time, MIN_PULSE_TIME);
     for (i = 0; i < hx71x->chip_count; i++) {
         gpio_out_write(hx71x->sclk[i], 0);
+        irq_poll();
     }
     //irq_enable();
 }
@@ -216,6 +218,7 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
         // read 2's compliment int bits
         for (i = 0; i < hx71x->chip_count; i++) {
             counts[i] = (counts[i] << 1) | gpio_in_read(hx71x->dout[i]);
+            irq_poll();
         }
     }
 
