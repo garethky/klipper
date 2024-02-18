@@ -42,7 +42,7 @@ static struct task_wake wake_hx71x;
 
 typedef unsigned int hx71x_time_t;
 
-/*
+
 static hx71x_time_t
 nsecs_to_ticks(uint32_t ns)
 {
@@ -55,7 +55,6 @@ hx71x_check_elapsed(hx71x_time_t t1, hx71x_time_t t2
 {
     return t2 - t1 >= ticks;
 }
-*/
 
 // Turn off delays for GD32 chips because their 16 bit timer is not
 // compatible with long delays
@@ -76,6 +75,7 @@ hx71x_delay_no_irq(hx71x_time_t start, hx71x_time_t ticks)
     while (!hx71x_check_elapsed(start, hx71x_get_time(), ticks))
         ;
 }
+*/
 
 static inline void
 hx71x_delay(hx71x_time_t start, hx71x_time_t ticks)
@@ -83,14 +83,14 @@ hx71x_delay(hx71x_time_t start, hx71x_time_t ticks)
     while (!hx71x_check_elapsed(start, hx71x_get_time(), ticks))
         irq_poll();
 }
-*/
+
 
 
 /****************************************************************
  * HX711 and HX717 Sensor Support
  ****************************************************************/
 // both HX717 and HX711 have 200ns min pulse time for clock pin on/off
-//#define MIN_PULSE_TIME nsecs_to_ticks(200)
+#define MIN_PULSE_TIME nsecs_to_ticks(250)
 
 static inline uint8_t
 is_flag_set(const uint8_t mask, struct hx71x_adc *hx71x)
@@ -183,16 +183,17 @@ inline static void
 hx71x_pulse_clocks(struct hx71x_adc *hx71x) {
     //irq_disable();
     uint_fast8_t i;
-    //hx71x_time_t start_time = hx71x_get_time();
+    hx71x_time_t start_time = hx71x_get_time();
     for (i = 0; i < hx71x->chip_count; i++) {
         gpio_out_write(hx71x->sclk[i], 1);
         irq_poll();
     }
-    //hx71x_delay_no_irq(start_time, MIN_PULSE_TIME);
+    hx71x_delay(start_time, MIN_PULSE_TIME);
     for (i = 0; i < hx71x->chip_count; i++) {
         gpio_out_write(hx71x->sclk[i], 0);
         irq_poll();
     }
+    hx71x_delay(start_time, MIN_PULSE_TIME + MIN_PULSE_TIME);
     //irq_enable();
 }
 
@@ -214,7 +215,6 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
     uint_fast8_t i;
     for (uint_fast8_t sample_idx = 0; sample_idx < 24; sample_idx++) {
         hx71x_pulse_clocks(hx71x);
-        //hx71x_delay(hx71x_get_time(), MIN_PULSE_TIME);
         // read 2's compliment int bits
         for (i = 0; i < hx71x->chip_count; i++) {
             counts[i] = (counts[i] << 1) | gpio_in_read(hx71x->dout[i]);
@@ -236,6 +236,7 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
     if (time_diff >= hx71x->rest_ticks) {
         // some IRQ delayed this read so much that the chips must be reset
         // reads that take this long cant be trusted to yield bits from the same reading.
+        // Current thinking is on the K1 this is due to some sort of timer error
         output("HX71x read took too long: Read: True, t_start: %u, t_end: %u, t_diff: %u", start_time, end_time, time_diff);
         //hx71x_reset(hx71x, oid);
         //return;
@@ -247,6 +248,7 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
         // if its 0, that probably means the chip got hit with ESD
         if (!gpio_in_read(hx71x->dout[i])) {
             output("HX71x dout pin is 0 on sensor: %u ", i);
+            return;  // so if we see this we dont return the error to host
         }
         // extend 2's complement 24 bits to 32bits
         if (counts[i] >= 0x800000) {
