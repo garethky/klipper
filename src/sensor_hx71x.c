@@ -96,7 +96,7 @@ hx71x_delay(hx71x_time_t start, hx71x_time_t ticks)
  * HX711 and HX717 Sensor Support
  ****************************************************************/
 // both HX717 and HX711 have 200ns min pulse time for clock pin on/off
-#define MIN_PULSE_TIME nsecs_to_ticks(250)
+#define MIN_PULSE_TIME nsecs_to_ticks(300)
 
 static inline uint8_t
 is_flag_set(const uint8_t mask, struct hx71x_adc *hx71x)
