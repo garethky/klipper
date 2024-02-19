@@ -254,6 +254,7 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
         // if its 0, that probably means the chip got hit with ESD
         if (!gpio_in_read(hx71x->dout[i])) {
             output("HX71x dout pin is 0 on sensor: %u ", i);
+            hx71x_reschedule_timer(hx71x);
             return;  // so if we see this we dont return the error to host
         }
         // extend 2's complement 24 bits to 32bits
