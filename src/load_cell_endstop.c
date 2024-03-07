@@ -205,6 +205,8 @@ load_cell_endstop_report_sample(struct load_cell_endstop *lce
                                                 lce);
     // update trigger state
     if (is_trigger && lce->trigger_count > 0) {
+        output("Trigger Detected: Sample counts: %i outside range: [%i, %i] at ticks: %i",
+                    sample, lce->trigger_counts_min, lce->trigger_counts_max, ticks);
         // the first triggering sample when homing sets the trigger time
         if (is_homing && !is_homing_triggered
                 && lce->trigger_count == lce->sample_count) {
