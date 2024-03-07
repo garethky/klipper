@@ -5,6 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import collections, logging
 from . import hx71x
+from . import ads1220
 from .bulk_sensor import BatchWebhooksClient
 
 class SaturationException(Exception):
@@ -81,13 +82,15 @@ class LoadCellCommandHelper:
         name_parts = config.get_name().split()
         self.name = name_parts[-1]
         self.register_commands(self.name)
+        logging.info("Registering commands as: %s" % (self.name))
         if len(name_parts) == 1:
             # TODO: when this is a [load_cell_probe], what should happen here?
             # TODO: What if there are multiple probes?
             # TODO: Duplicate names: [load_cell foo] [load_cell_probe foo] ??
             if (self.name == "load_cell"
                     or not config.has_section("load_cell")):
-                self.register_commands(None)
+                logging.info("Registering default commands for: %s" % (self.name))
+                #self.register_commands(None)
     def register_commands(self, name):
         # Register commands
         gcode = self.printer.lookup_object('gcode')
@@ -474,6 +477,7 @@ def load_config(config):
     # Sensor types
     sensors = {}
     sensors.update(hx71x.HX71X_SENSOR_TYPES)
+    sensors.update({"ads1220": ads1220.ADS1220})
     sensor_class = config.getchoice('sensor_type', sensors)
     return LoadCell(config, sensor_class(config))
 
