@@ -4498,10 +4498,10 @@ sensor_type:
 #reference_tare_counts:
 #   These parameters must be configured before the probe will operate.
 #   See the [load_cell] section for further details.
-#safety_limit_grams: 1000g
+#safety_limit: 1000g
 #   The safe limit for probing force relative to the reference_tare_counts on
 #   the load_cell. The default is +/-1Kg.
-#trigger_force_grams: 50.0
+#trigger_force: 50.0
 #   The force that the probe will trigger at. 50g is the default.
 #continuous_tare_highpass: 0.8
 #   Enable optional continuous taring while homing & probing to reject drift.
@@ -4544,7 +4544,7 @@ sensor_type:
 #   Time to collect additional samples after the pullback move ends in seconds.
 #   This improves accuracy by giving the algorithm more points after the probe
 #   breaks contact with the bed. Disabling this entirely may impact reliability.
-#tare_count: 16
+#tare_samples: 16
 #   The number of samples to use when automatically taring the load_cell before
 #   each probe. The default value is: sample_per_second * (1 / 60) * 4. This
 #   collects samples from 4 cycles of 60Hz mains power to cancel power line
