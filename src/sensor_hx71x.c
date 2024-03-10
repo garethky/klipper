@@ -158,11 +158,9 @@ hx71x_reset(struct hx71x_adc *hx71x, uint8_t oid) {
 
 int8_t
 hx71x_is_data_ready(struct hx71x_adc *hx71x) {
-    // if any pin is high the samples are not all ready
-    for (uint_fast8_t i = 0; i < hx71x->chip_count; i++) {
-        if (gpio_in_read(hx71x->dout[i])) {
-            return 0;
-        }
+    // if dout pin is high the sample is not ready
+    if (gpio_in_read(hx71x->dout[0])) {
+        return 0;
     }
     return 1;
 }
