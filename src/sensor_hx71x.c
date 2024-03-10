@@ -18,6 +18,7 @@
 struct hx71x_adc {
     struct timer timer;
     uint32_t rest_ticks;
+    int32_t sensor_values[4];
     struct gpio_in dout[4]; // pins used to receive data from the hx71x 0
     struct gpio_out sclk[4]; // pins used to generate clock for the hx71x 0
     uint8_t chip_count;      // the numbers of sensor chips, 3 or 4
@@ -135,7 +136,6 @@ hx71x_reschedule_timer(struct hx71x_adc *hx71x)
     irq_disable();
     set_flag(FLAG_PENDING, hx71x);
     //hx71x->timer.waketime += timer_read_time() + hx71x->rest_ticks;
-    // suspect timer_read_time() may not work correctly on GD32:
     hx71x->timer.waketime += hx71x->rest_ticks;
     sched_add_timer(&hx71x->timer);
     irq_enable();
@@ -158,9 +158,11 @@ hx71x_reset(struct hx71x_adc *hx71x, uint8_t oid) {
 
 int8_t
 hx71x_is_data_ready(struct hx71x_adc *hx71x) {
-    // if dout pin is high the sample is not ready
-    if (gpio_in_read(hx71x->dout[0])) {
-        return 0;
+    // if any pin is high the samples are not all ready
+    for (uint_fast8_t i = 0; i < hx71x->chip_count; i++) {
+        if (gpio_in_read(hx71x->dout[i])) {
+            return 0;
+        }
     }
     return 1;
 }
@@ -186,18 +188,22 @@ flush_samples(struct hx71x_adc *hx71x, uint8_t oid)
 
 // Pulse all clock pins to move to the next bit
 inline static void
-hx71x_pulse_clocks(struct hx71x_adc *hx71x) {
+hx71x_pulse_clocks(struct hx71x_adc *hx71x, uint8_t is_ready[4]) {
     //irq_disable();
     uint_fast8_t i;
     hx71x_time_t start_time = hx71x_get_time();
     for (i = 0; i < hx71x->chip_count; i++) {
-        gpio_out_write(hx71x->sclk[i], 1);
-        irq_poll();
+        if (is_ready[i]) {
+            gpio_out_write(hx71x->sclk[i], 1);
+            irq_poll();
+        }
     }
     hx71x_delay(start_time, MIN_PULSE_TIME);
     for (i = 0; i < hx71x->chip_count; i++) {
-        gpio_out_write(hx71x->sclk[i], 0);
-        irq_poll();
+        if (is_ready[i]) {
+            gpio_out_write(hx71x->sclk[i], 0);
+            irq_poll();
+        }
     }
     hx71x_delay(start_time, MIN_PULSE_TIME + MIN_PULSE_TIME);
     //irq_enable();
@@ -207,8 +213,15 @@ hx71x_pulse_clocks(struct hx71x_adc *hx71x) {
 void
 hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
 {
+    uint8_t is_ready[4] = {0, 0, 0, 0};
+    uint_fast8_t i;
     hx71x_time_t start_time = hx71x_get_time();
-    if (!hx71x_is_data_ready(hx71x)) {
+    for (i = 0; i < hx71x->chip_count; i++) {
+        is_ready[i] = !gpio_in_read(hx71x->dout[i]);
+    }
+    uint8_t is_any_ready = is_ready[0] || is_ready[1] || is_ready[2] || is_ready[3];
+
+    if (!is_any_ready) {
         hx71x_reschedule_timer(hx71x);
         hx71x_time_t end_time = hx71x_get_time();
         hx71x_time_t time_diff = end_time - start_time;
@@ -216,21 +229,21 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
         return;
     }
 
-    // data is ready
+    // some data is ready
     int32_t counts[4] = {0, 0, 0, 0};
-    uint_fast8_t i;
     for (uint_fast8_t sample_idx = 0; sample_idx < 24; sample_idx++) {
-        hx71x_pulse_clocks(hx71x);
+        hx71x_pulse_clocks(hx71x, is_ready);
         // read 2's compliment int bits
         for (i = 0; i < hx71x->chip_count; i++) {
-            counts[i] = (counts[i] << 1) | gpio_in_read(hx71x->dout[i]);
-            irq_poll();
+            if (is_ready[i]) {
+                counts[i] = (counts[i] << 1) | gpio_in_read(hx71x->dout[i]);
+            }
         }
     }
 
     // bit bang 1 to 4 more bits to configure gain & channel for the next sample
     for (uint8_t gain_idx = 0; gain_idx < hx71x->gain_channel; gain_idx++) {
-        hx71x_pulse_clocks(hx71x);
+        hx71x_pulse_clocks(hx71x, is_ready);
         // test if this delay is causing bad reads?
         //if (gain_idx < hx71x->gain_channel - 1) {
         //hx71x_delay(hx71x_get_time(), MIN_PULSE_TIME);
@@ -247,9 +260,11 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
         //hx71x_reset(hx71x, oid);
         //return;
     }
-
-    int32_t total_counts = 0;
+    
     for (i = 0; i < hx71x->chip_count; i++) {
+        if (!is_ready[i]) {
+            continue;
+        }
         // dout should be 1, which indacates sample not ready
         // if its 0, that probably means the chip got hit with ESD
         if (!gpio_in_read(hx71x->dout[i])) {
@@ -264,16 +279,28 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
         if (counts[i] < -0x7FFFFF || counts[i] > 0x7FFFFF) {
             output("HX71x value out of 24 bit range: %i ", counts[i]);
         }
-        total_counts += counts[i];
-        add_sample(hx71x, counts[i]);
+        // cache the value for sending to host later
+        hx71x->sensor_values[i] = counts[i];
     }
 
     // endstop is optional, report if enabled
+    // reports any new infromation immediatly
     if (hx71x->lce) {
+        int32_t total_counts = 0;
+        for (i = 0; i < hx71x->chip_count; i++) {
+            total_counts += hx71x->sensor_values[i];
+        }
         load_cell_endstop_report_sample(hx71x->lce, total_counts, start_time);
     }
 
-    flush_samples(hx71x, oid);
+    // only report samples to the host based on the clock of the primrary sensor
+    if (is_ready[0]) {
+        for (i = 0; i < hx71x->chip_count; i++) {
+            add_sample(hx71x, hx71x->sensor_values[i]);
+        }
+        flush_samples(hx71x, oid);
+    }
+
     hx71x_reschedule_timer(hx71x);
     end_time = hx71x_get_time();
     time_diff = end_time - start_time;
@@ -325,6 +352,9 @@ command_query_hx71x(uint32_t *args)
     sched_del_timer(&hx71x->timer);
     hx71x->flags = 0;
     hx71x->rest_ticks = args[1];
+    for (uint8_t i = 0; i < 4; i++){
+        hx71x->sensor_values[i] = 0;
+    }
     if (!hx71x->rest_ticks) {
         // End measurements
         return;
