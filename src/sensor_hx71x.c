@@ -43,7 +43,6 @@ static struct task_wake wake_hx71x;
 
 typedef unsigned int hx71x_time_t;
 
-
 static hx71x_time_t
 nsecs_to_ticks(uint32_t ns)
 {
@@ -54,37 +53,37 @@ static inline int
 hx71x_check_elapsed(hx71x_time_t t1, hx71x_time_t t2
                        , hx71x_time_t ticks)
 {
-    // if the timer gives incoherant results stop waiting immediatly
-    if (t1 > t2) {
-        output("HX71x delay aborted: t1: %u, t1: %u, t_diff: %u", t1, t1, t1 - t1);
-        // Creality overflow counter hack
-        t2 += 0xFFFFFFFF;
-        //return 1;
-    }
-
     return t2 - t1 >= ticks;
 }
 
-// Turn off delays for GD32 chips because their 16 bit timer is not
-// compatible with long delays
-// GD32 uses standard timer_read_time()
+// The AVR micro-controllers require specialized timing
+#if CONFIG_MACH_AVR
+
+#include <avr/interrupt.h> // TCNT1
+
+static hx71x_time_t
+hx71x_get_time(void)
+{
+    return TCNT1;
+}
+
+#define hx71x_delay_no_irq(start, ticks) (void)(ticks)
+#define hx71x_delay(start, ticks) (void)(ticks)
+
+#else
+
 static hx71x_time_t
 hx71x_get_time(void)
 {
     return timer_read_time();
 }
 
-// these chips are too slow to use delays
-// #define hx71x_delay_no_irq(start, ticks) (void)(ticks)
-//#define hx71x_delay(start, ticks) (void)(ticks)
-/*
 static inline void
 hx71x_delay_no_irq(hx71x_time_t start, hx71x_time_t ticks)
 {
     while (!hx71x_check_elapsed(start, hx71x_get_time(), ticks))
         ;
 }
-*/
 
 static inline void
 hx71x_delay(hx71x_time_t start, hx71x_time_t ticks)
@@ -93,13 +92,15 @@ hx71x_delay(hx71x_time_t start, hx71x_time_t ticks)
         irq_poll();
 }
 
-
+#endif
 
 /****************************************************************
  * HX711 and HX717 Sensor Support
  ****************************************************************/
 // both HX717 and HX711 have 200ns min pulse time for clock pin on/off
-#define MIN_PULSE_TIME nsecs_to_ticks(300)
+#define MIN_PULSE_TIME nsecs_to_ticks(200)
+// powerdown delay for HX717 is 100us and for HX711 is 60us 
+#define POWERDOWN_TIME nsecs_to_ticks(150000)
 
 static inline uint8_t
 is_flag_set(const uint8_t mask, struct hx71x_adc *hx71x)
@@ -135,36 +136,15 @@ hx71x_reschedule_timer(struct hx71x_adc *hx71x)
 {
     irq_disable();
     set_flag(FLAG_PENDING, hx71x);
-    //hx71x->timer.waketime += timer_read_time() + hx71x->rest_ticks;
-    hx71x->timer.waketime += hx71x->rest_ticks;
+    hx71x->timer.waketime += timer_read_time() + hx71x->rest_ticks;
     sched_add_timer(&hx71x->timer);
     irq_enable();
-}
-
-void
-hx71x_reset(struct hx71x_adc *hx71x, uint8_t oid) {
-    // stop running the read task if one exists:
-    sched_del_timer(&hx71x->timer);
-    hx71x->flags = 0;
-    set_flag(FLAG_RESET_REQUIRED, hx71x);
-    // The chips are reset by setting PD_SCK pin high and waiting
-    // 60us for HX711 or 100us for HX717. Host/mcu delay is larger than this.
-    for (uint_fast8_t i = 0; i < hx71x->chip_count; i++) {
-        gpio_out_write(hx71x->sclk[i], 1);
-    }
-    // Notify host of the reset
-    sendf("reset_hx71x oid=%c", oid);
 }
 
 int8_t
 hx71x_is_data_ready(struct hx71x_adc *hx71x) {
     // if any pin is high the samples are not all ready
-    for (uint_fast8_t i = 0; i < hx71x->chip_count; i++) {
-        if (gpio_in_read(hx71x->dout[i])) {
-            return 0;
-        }
-    }
-    return 1;
+    return !gpio_in_read(hx71x->dout[0]);
 }
 
 // Add a measurement to the buffer
@@ -189,24 +169,21 @@ flush_samples(struct hx71x_adc *hx71x, uint8_t oid)
 // Pulse all clock pins to move to the next bit
 inline static void
 hx71x_pulse_clocks(struct hx71x_adc *hx71x, uint8_t is_ready[4]) {
-    //irq_disable();
+    irq_disable();
     uint_fast8_t i;
     hx71x_time_t start_time = hx71x_get_time();
     for (i = 0; i < hx71x->chip_count; i++) {
         if (is_ready[i]) {
             gpio_out_write(hx71x->sclk[i], 1);
-            irq_poll();
         }
     }
-    hx71x_delay(start_time, MIN_PULSE_TIME);
+    hx71x_delay_no_irq(start_time, MIN_PULSE_TIME);
     for (i = 0; i < hx71x->chip_count; i++) {
         if (is_ready[i]) {
             gpio_out_write(hx71x->sclk[i], 0);
-            irq_poll();
         }
     }
-    hx71x_delay(start_time, MIN_PULSE_TIME + MIN_PULSE_TIME);
-    //irq_enable();
+    irq_enable();
 }
 
 // hx71x ADC query
@@ -223,9 +200,6 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
 
     if (!is_any_ready) {
         hx71x_reschedule_timer(hx71x);
-        hx71x_time_t end_time = hx71x_get_time();
-        hx71x_time_t time_diff = end_time - start_time;
-        output("HX71x Timing: Read: False, t_start: %u, t_end: %u, t_diff: %u", start_time, end_time, time_diff);
         return;
     }
 
@@ -233,6 +207,7 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
     int32_t counts[4] = {0, 0, 0, 0};
     for (uint_fast8_t sample_idx = 0; sample_idx < 24; sample_idx++) {
         hx71x_pulse_clocks(hx71x, is_ready);
+        hx71x_delay(hx71x_get_time(), MIN_PULSE_TIME);
         // read 2's compliment int bits
         for (i = 0; i < hx71x->chip_count; i++) {
             if (is_ready[i]) {
@@ -244,21 +219,14 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
     // bit bang 1 to 4 more bits to configure gain & channel for the next sample
     for (uint8_t gain_idx = 0; gain_idx < hx71x->gain_channel; gain_idx++) {
         hx71x_pulse_clocks(hx71x, is_ready);
-        // test if this delay is causing bad reads?
-        //if (gain_idx < hx71x->gain_channel - 1) {
-        //hx71x_delay(hx71x_get_time(), MIN_PULSE_TIME);
-        //}
+        hx71x_delay(hx71x_get_time(), MIN_PULSE_TIME);
     }
 
     hx71x_time_t end_time = hx71x_get_time();
     hx71x_time_t time_diff = end_time - start_time;
     if (time_diff >= hx71x->rest_ticks) {
         // some IRQ delayed this read so much that the chips must be reset
-        // reads that take this long cant be trusted to yield bits from the same reading.
-        // Current thinking is on the K1 this is due to some sort of timer error
-        output("HX71x read took too long: Read: True, t_start: %u, t_end: %u, t_diff: %u", start_time, end_time, time_diff);
-        //hx71x_reset(hx71x, oid);
-        //return;
+        shutdown("HX71x read took too long");
     }
     
     for (i = 0; i < hx71x->chip_count; i++) {
@@ -277,7 +245,7 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
             counts[i] |= 0xFF000000;
         }
         if (counts[i] < -0x7FFFFF || counts[i] > 0x7FFFFF) {
-            output("HX71x value out of 24 bit range: %i ", counts[i]);
+            shutdown("HX71x value out of 24 bit range");
         }
         // cache the value for sending to host later
         hx71x->sensor_values[i] = counts[i];
@@ -302,9 +270,6 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
     }
 
     hx71x_reschedule_timer(hx71x);
-    end_time = hx71x_get_time();
-    time_diff = end_time - start_time;
-    output("HX71x Timing: Read: True, t_start: %u, t_end: %u, t_diff: %u", start_time, end_time, time_diff);
 }
 
 // Create a hx71x sensor
@@ -337,6 +302,14 @@ command_config_hx71x(uint32_t *args)
         gpio_out_write(hx71x->sclk[chip_idx], 0);
         arg_idx += 2;
     }
+    // Try to syncronize senors
+    for (uint_fast8_t i = 0; i < hx71x->chip_count; i++) {
+        gpio_out_write(hx71x->sclk[i], 1);
+    }
+    hx71x_delay(hx71x_get_time(), POWERDOWN_TIME);
+    for (uint_fast8_t i = 0; i < hx71x->chip_count; i++) {
+        gpio_out_write(hx71x->sclk[i], 0);
+    }
 }
 DECL_COMMAND(command_config_hx71x, "config_hx71x oid=%c"
     " chip_count=%c gain_channel=%c load_cell_endstop_oid=%c"
@@ -361,12 +334,6 @@ command_query_hx71x(uint32_t *args)
     }
     // Start new measurements
     sensor_bulk_reset(&hx71x->sb);
-    // Put all chips in run mode, in case they were reset
-    //irq_disable();
-    for (uint_fast8_t i = 0; i < hx71x->chip_count; i++) {
-        gpio_out_write(hx71x->sclk[i], 0);
-    }
-    //irq_enable();
     hx71x_reschedule_timer(hx71x);
 }
 DECL_COMMAND(command_query_hx71x,
@@ -378,12 +345,9 @@ command_query_hx71x_status(const uint32_t *args)
     uint8_t oid = args[0];
     struct hx71x_adc *hx71x = oid_lookup(oid, command_config_hx71x);
     const hx71x_time_t start_t = hx71x_get_time();
-    const uint8_t reset_required = is_flag_set(FLAG_RESET_REQUIRED, hx71x);
     uint8_t pending_bytes = 0;
-    if (!reset_required) {
-        pending_bytes = hx71x_is_data_ready(hx71x);
-        pending_bytes *= (BYTES_PER_SAMPLE * hx71x->chip_count);
-    }
+    pending_bytes = hx71x_is_data_ready(hx71x);
+    pending_bytes *= (BYTES_PER_SAMPLE * hx71x->chip_count);
     const hx71x_time_t end_t = hx71x_get_time();
     sensor_bulk_status(&hx71x->sb, oid, start_t, (end_t - start_t)
                       , pending_bytes);
@@ -399,8 +363,7 @@ hx71x_capture_task(void)
     uint8_t oid;
     struct hx71x_adc *hx71x;
     foreach_oid(oid, hx71x, command_config_hx71x) {
-        uint_fast8_t flags = hx71x->flags;
-        if (flags & FLAG_PENDING) {
+        if (is_flag_set(FLAG_PENDING, hx71x)) {
             hx71x_read_adc(hx71x, oid);
         }
     }
