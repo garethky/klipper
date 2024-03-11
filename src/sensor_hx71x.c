@@ -136,7 +136,7 @@ hx71x_reschedule_timer(struct hx71x_adc *hx71x)
 {
     irq_disable();
     set_flag(FLAG_PENDING, hx71x);
-    hx71x->timer.waketime += timer_read_time() + hx71x->rest_ticks;
+    hx71x->timer.waketime = timer_read_time() + hx71x->rest_ticks;
     sched_add_timer(&hx71x->timer);
     irq_enable();
 }
