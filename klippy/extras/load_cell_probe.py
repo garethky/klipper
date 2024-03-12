@@ -767,7 +767,7 @@ class LoadCellPrinterProbe(probe.PrinterProbe):
         printer = config.get_printer()
         self._load_cell = load_cell_inst
         self._lc_endstop = load_cell_endstop
-        self.pullback_dist = config.getfloat('pullback_dist', minval=0.01,
+        self.pullback_distance = config.getfloat('pullback_dist', minval=0.01,
                                              maxval=2.0, default=0.1)
         sps = self._load_cell.get_sensor().get_samples_per_second()
         default_pullback_speed = sps * 0.001
@@ -778,7 +778,6 @@ class LoadCellPrinterProbe(probe.PrinterProbe):
                                     maxval=1.0, default=default_pullback_speed)
         self.pullback_extra_time = config.getfloat('pullback_extra_time',
                                     minval=0.00, maxval=1.0, default=0.3)
-        self.pullback_distance = 0.1
         self.bad_tap_module = self.load_module(config, 'bad_tap_module',
                                                BadTapModule())
         self.nozzle_cleaner_module = self.load_module(config,
