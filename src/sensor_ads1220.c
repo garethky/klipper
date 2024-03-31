@@ -154,13 +154,19 @@ command_config_ads1220(uint32_t *args)
     ads1220->timer.func = ads1220_event;
     ads1220->flags = 0;
     ads1220->spi = spidev_oid_lookup(args[1]);
-    if (args[2] != 0) {
-        ads1220->lce = load_cell_endstop_oid_lookup(args[2]);
-    }
-    ads1220->data_ready = gpio_in_setup(args[3], 0);
+    ads1220->data_ready = gpio_in_setup(args[2], 0);
 }
 DECL_COMMAND(command_config_ads1220, "config_ads1220 oid=%c"
-    " spi_oid=%c load_cell_endstop_oid=%c data_ready_pin=%u");
+    " spi_oid=%c data_ready_pin=%u");
+
+void
+command_attach_endstop_ads1220(uint32_t *args) {
+    uint8_t oid = args[0];
+    struct ads1220_adc *ads1220 = oid_lookup(oid, command_config_ads1220);
+    ads1220->lce = load_cell_endstop_oid_lookup(args[1]);
+}
+DECL_COMMAND(command_attach_endstop_ads1220, "attach_endstop_ads1220 oid=%c"
+    " load_cell_endstop_oid=%c");
 
 // start/stop capturing ADC data
 void

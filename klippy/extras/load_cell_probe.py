@@ -478,7 +478,7 @@ class LoadCellEndstop:
         self._load_cell = load_cell_inst
         self._sensor = sensor = load_cell_inst.get_sensor()
         self._mcu = mcu = sensor.get_mcu()
-        self._oid = sensor.get_load_cell_endstop_oid()
+        self._oid = mcu.create_oid()
         self._rest_time = 1. / float(sensor.get_samples_per_second())
         self.settling_time = config.getfloat('settling_time', default=0.375,
                                              minval=0, maxval=1)
@@ -535,7 +535,8 @@ class LoadCellEndstop:
         self.tare_counts = 0
         self.last_trigger_time = 0
         self._config_commands()
-        self._mcu.register_config_callback(self._build_config)
+        mcu.register_config_callback(self._build_config)
+        printer.register_event_handler("klippy:ready", self._ready_handler)
         printer.register_event_handler("load_cell:tare",
                                        self._handle_load_cell_tare)
     def _config_commands(self):
@@ -580,6 +581,8 @@ class LoadCellEndstop:
             "config_filter_section_load_cell_endstop oid=%c n_sections=%c"
             " section_idx=%c sos0=%i sos1=%i sos2=%i sos3=%i sos4=%i",
             cq=cmd_queue)
+    def _ready_handler(self):
+        self._sensor.attach_endstop(self._oid)
     def get_status(self, eventtime):
         return {
             'endstop_tare_counts': self.tare_counts,
@@ -587,10 +590,12 @@ class LoadCellEndstop:
         }
     def _handle_load_cell_tare(self, lc):
         if lc is self._load_cell:
+            logging.info("load cell tare event: %s" % (lc.get_tare_counts(),))
             self.set_endstop_range(lc.get_tare_counts())
     def set_endstop_range(self, tare_counts):
         if not self._load_cell.is_calibrated():
             raise self._printer.command_error("Load cell not calibrated")
+        tare_counts = int(tare_counts)
         self.tare_counts = tare_counts
         counts_per_gram = self._load_cell.get_counts_per_gram()
         # calculate the safety band
@@ -600,23 +605,25 @@ class LoadCellEndstop:
         safety_max = int(reference_tare + safety_margin)
         # narrow to trigger band:
         trigger_margin = int(counts_per_gram * self.trigger_force_grams)
-        trigger_min = max(int(tare_counts - trigger_margin), safety_min)
-        trigger_max = min(int(tare_counts + trigger_margin), safety_max)
+        trigger_min = max(tare_counts - trigger_margin, safety_min)
+        trigger_max = min(tare_counts + trigger_margin, safety_max)
         # the filter is restricted to no more than +/- 2^Q_12 - 1 grams (2048)
         # this cant be changed without also changing from q12 format in MCU
         safe_bits = (Q12_INT_BITS - 1)
         filter_margin = math.floor(counts_per_gram * (2 ** safe_bits))
-        filter_min = max(int(tare_counts - filter_margin), safety_min)
-        filter_max = min(int(tare_counts + filter_margin), safety_max)
+        filter_min = max(tare_counts - filter_margin, safety_min)
+        filter_max = min(tare_counts + filter_margin, safety_max)
         # truncate extra bits for sensors with a large counts_per_gram
-        storage_bits = (math.ceil(math.log(counts_per_gram, 2)))
-        rounding_shift = max(0, storage_bits - safe_bits)
+        storage_bits = int(math.ceil(math.log(counts_per_gram, 2)))
+        rounding_shift = int(max(0, storage_bits - safe_bits))
         # grams per count, in rounded units
         grams_per_count = 1. / (counts_per_gram / (2 ** rounding_shift))
+        logging.info("Set endstop range: %s, %s, %s" % (trigger_min, trigger_max, tare_counts))
         args = [self._oid, safety_min, safety_max, filter_min, filter_max,
-                trigger_min, trigger_max, int(tare_counts),
+                trigger_min, trigger_max, tare_counts,
                 as_fixedQ12(self.continuous_trigger_force),
-                int(rounding_shift), as_fixedQ12(grams_per_count)]
+                rounding_shift, as_fixedQ12(grams_per_count)]
+
         self._set_range_cmd.send(args)
     def get_mcu(self):
         return self._mcu
@@ -934,7 +941,7 @@ def load_config(config):
     sensors = {}
     sensors.update(hx71x.HX71X_SENSOR_TYPES)
     sensor_class = config.getchoice('sensor_type', sensors)
-    sensor = sensor_class(config, allocate_endstop_oid=True)
+    sensor = sensor_class(config)
     lc = load_cell.LoadCell(config, sensor)
     printer = config.get_printer()
     name = config.get_name().split()[-1]

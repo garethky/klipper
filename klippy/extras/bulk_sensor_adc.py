@@ -25,13 +25,11 @@ class BulkSensorAdc(object):
         pass
 
 # Interface for BulkSensorAdc variants that want to support LoadCellProbe
-# The class __init__ must also take an optional parameter:
-#     allocate_endstop_oid=False
 class LoadCellEndstopSensor(object):
-    # get the OID allocated to the LoadCellEndstop by the sensor
-    # this makes sure the LCE is on the same MCE as the sensor
-    def get_load_cell_endstop_oid(self):
-        return 0
+    # create an endstop oid on the MCU where the sensor is and attach
+    # it to the sensor
+    def attach_endstop(self, endstop_oid):
+        pass
 
 # Helper for ClockSyncRegression that handles generating timestamps
 # while processing a batch of samples

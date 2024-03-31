@@ -21,19 +21,21 @@ RREG_CMD = 0x20
 WREG_CMD = 0x40
 NOOP_CMD = 0x0
 
+
 # turn bytearrays into pretty hex strings: [0xff, 0x1]
 def hexify(byte_array):
     return "[%s]" % (",".join([hex(b) for b in byte_array]))
 
+
 class ADS1220(BulkSensorAdc, LoadCellEndstopSensor):
-    def __init__(self, config, allocate_endstop_oid=False):
+    def __init__(self, config):
         self.printer = printer = config.get_printer()
         self.name = config.get_name().split()[-1]
         self.unpack_int = struct.Struct('<i').unpack_from
         ## Process config options
         # Gain
         self.gain_options = {'1': 0x0, '2': 0x1, '4': 0x2, '8': 0x3, '16': 0x4,
-                        '32': 0x5, '64': 0x6, '128': 0x7}
+                             '32': 0x5, '64': 0x6, '128': 0x7}
         self.gain = config.getchoice('gain', self.gain_options, default='128')
         # Sample rate
         self.sps_normal = {'20': 20, '45': 45, '90': 90, '175': 175,
@@ -60,10 +62,6 @@ class ADS1220(BulkSensorAdc, LoadCellEndstopSensor):
         if drdy_pin_mcu != self.mcu:
             raise config.error("ADS1220 config error: SPI communication and"
                                " data_ready_pin must be on the same MCU")
-        # Load cell endstop support
-        self.lce_oid = 0
-        if allocate_endstop_oid:
-            self.lce_oid = self.mcu.create_oid()
         ## Bulk Sensor Setup
         self.bulk_queue = bulk_sensor.BulkDataQueue(self.mcu, oid=self.oid)
         # Clock tracking
@@ -77,7 +75,8 @@ class ADS1220(BulkSensorAdc, LoadCellEndstopSensor):
             self._finish_measurements, UPDATE_INTERVAL)
         # publish raw samples to the socket
         self.batch_bulk.add_mux_endpoint("ads1220/dump_ads1220", "sensor",
-                                    self.name, {'header': ('time', 'counts')})
+                                         self.name,
+                                         {'header': ('time', 'counts')})
         self.query_ads1220_cmd = None
         self.mcu.register_config_callback(self._build_config)
         # startup, when klippy is ready, start capturing data
@@ -85,27 +84,24 @@ class ADS1220(BulkSensorAdc, LoadCellEndstopSensor):
 
     def _build_config(self):
         cmdqueue = self.spi.get_command_queue()
-        self.mcu.add_config_cmd("config_ads1220 oid=%d spi_oid=%d load_cell_endstop_oid=%d data_ready_pin=%s"
-        % (self.oid, self.spi.get_oid(), self.lce_oid, self.data_ready_pin))
+        self.mcu.add_config_cmd("config_ads1220 oid=%d spi_oid=%d "
+            "data_ready_pin=%s"
+            % (self.oid, self.spi.get_oid(), self.data_ready_pin))
+        self.config_endstop_cmd = self.mcu.lookup_command(
+            "attach_endstop_ads1220 oid=%c load_cell_endstop_oid=%c")
         self.mcu.add_config_cmd("query_ads1220 oid=%d rest_ticks=0"
                                 % (self.oid,), on_restart=True)
         self.query_ads1220_cmd = self.mcu.lookup_command(
             "query_ads1220 oid=%c rest_ticks=%u", cq=cmdqueue)
         self.clock_updater.setup_query_command(self.mcu,
-            "query_ads1220_status oid=%c", self.oid, cq=cmdqueue)
+                                               "query_ads1220_status oid=%c",
+                                               self.oid, cq=cmdqueue)
 
     def _handle_ready(self):
         # reset chip on startup
-        #register_bytes = self.read_reg(0x0, 4)
-        #register_bytes = self.read_reg(0x0, 4)
-        #register_bytes = self.read_reg(0x0, 4)
         self.reset_chip()
         reactor = self.printer.get_reactor()
         reactor.pause(reactor.monotonic() + 0.1)
-        #register_bytes = self.read_reg(0x0, 4)
-        #register_bytes = self.read_reg(0x0, 4)
-        register_bytes = self.read_reg(0x0, 4)
-        logging.info("register contents after reset: %s" % (hexify(register_bytes),))
         self.setup_chip()
 
     def get_mcu(self):
@@ -124,8 +120,8 @@ class ADS1220(BulkSensorAdc, LoadCellEndstopSensor):
     def add_client(self, callback):
         self.batch_bulk.add_client(callback)
 
-    def get_load_cell_endstop_oid(self):
-        return self.lce_oid
+    def attach_endstop(self, endstop_oid):
+        self.config_endstop_cmd.send_wait_ack([self.oid, endstop_oid])
 
     # Measurement decoding
     def _extract_samples(self, raw_blocks):
@@ -175,11 +171,11 @@ class ADS1220(BulkSensorAdc, LoadCellEndstopSensor):
 
     def setup_chip(self):
         continuous = 0x1  # enable continuous conversions
-        mode = 0x2 if self.is_turbo else 0x0 # turbo mode
+        mode = 0x2 if self.is_turbo else 0x0  # turbo mode
         sps_list = self.sps_turbo if self.is_turbo else self.sps_normal
         data_rate = list(sps_list.keys()).index(str(self.sps))
         reg_values = [(self.gain << 1),
-                     (data_rate << 5) | (mode << 3) | (continuous << 2)]
+                      (data_rate << 5) | (mode << 3) | (continuous << 2)]
         self.write_reg(0x0, reg_values)
         # start measurements immediately
         self.send_command(START_SYNC_CMD)
@@ -208,8 +204,9 @@ class ADS1220(BulkSensorAdc, LoadCellEndstopSensor):
         if val_hex != stored_hex:
             raise self.printer.command_error(
                 "Failed to set ADS1220 register [0x%x] to %s: got %s. "
-                "This may be a connection problems (e.g. faulty wiring)" % (
+                "This may be a connection problem (e.g. faulty wiring)" % (
                     reg, val_hex, stored_hex))
+
 
 def load_config(config):
     return ADS1220(config)
