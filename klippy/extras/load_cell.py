@@ -443,7 +443,8 @@ class LoadCell:
             self._force_buffer.append(sample[1])
         return True
     def _force_g(self):
-        if self.is_calibrated() and self.is_tared():
+        if self.is_calibrated() and self.is_tared()\
+                and len(self._force_buffer) > 0:
             import numpy as np
             return {"force_g": round(np.average(self._force_buffer), 1),
                     "min_force_g": round(np.min(self._force_buffer), 1),
