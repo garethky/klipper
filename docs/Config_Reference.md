@@ -4574,26 +4574,18 @@ z_offset:
 
 ## Bulk ADC Sensors
 
-Klipper includes support for common ADC chips that can sample at a high data
-rate. These sensors may be used in any config section that requires a
-Bulk ADC (such as a `[load_cell]` or `[load_cell_probe]` section).
+Klipper includes support for ADC chips that can sample at a high data rate.
+These sensors may be used in any config section that requires a Bulk ADC (such
+as a `[load_cell]`).
 
-### hx711
+### XH711
+This is a 24 bit low sample rate chip suitable for filament scales.
 ```
 sensor_type: hx711
-sclk_pin1:
+sclk_pin:
 #   connected to the clock pin
-dout_pin1:
+dout_pin:
 #   connected to the data output pin
-#sclk_pin2:
-#sclk_pin3:
-#sclk_pin4:
-#dout_pin2:
-#dout_pin3:
-#dout_pin4:
-#   This sensor support up to 4 chips total. The chips are opperated as if they
-#   were a single ADC with multipe simultanous outputs. The outputs are summed
-#   together to produce a single value. This is useful for under bed scales.
 #gain: A-128
 #   Valid values for `gain` are `A-128`, `A-64`, `B-32`. The default is `A-128`.
 #   `A` denotes the input channel and the number denotes the gain. Only the 3
@@ -4605,22 +4597,14 @@ dout_pin1:
 #   in software.
 ```
 
-### hx717
+### HX717
+This is the higher sample rate version of the HX711, suitable for probes.
 ```
 sensor_type: hx717
-sclk_pin1:
+sclk_pin:
 #   connected to the clock pin
-dout_pin1:
+dout_pin:
 #   connected to the data output pin
-#sclk_pin2:
-#sclk_pin3:
-#sclk_pin4:
-#dout_pin2:
-#dout_pin3:
-#dout_pin4:
-#   This sensor support up to 4 chips total. The chips are opperated as if they
-#   were a single ADC with multipe simultanous outputs. The outputs are summed
-#   together to produce a single value. This is useful for under bed scales.
 #gain: A-128
 #   Valid values for `gain` are `A-128`, `B-64`, `A-64`, `B-8`.
 #   `A` denotes the input channel and the number denotes the gain setting.
@@ -4628,8 +4612,41 @@ dout_pin1:
 #   changing the gain setting also selects the channel being read.
 #sample_rate: 320
 #   Valid values for `sample_rate` are `320`, `80`, `20` or `10`.
-#   The default is `320`. This must match the wiring of the chip.
-#   The sample rate cannot be changed in software.
+#   The default is `320`. This must match the wiring of the chip. The sample
+#   rate cannot be changed in software.
+```
+
+### ADS1220
+The ADS1220 is a 24 bit ADC supporting up to a 2Khz sample rate configurable in
+software.
+```
+sensor_type: ads1220
+cs_pin:
+#   The pin corresponding to the ADS1220 chip select line. This parameter must
+#   be provided.
+#spi_speed: 512000
+#   This chip supports 2 speeds: 256000 or 512000. The faster speed is only
+#   enabled when one of the Turbo sample rates is used. The correct spi_speed
+#   is selected based on the sample rate. 
+#spi_bus:
+#spi_software_sclk_pin:
+#spi_software_mosi_pin:
+#spi_software_miso_pin:
+#   See the "common SPI settings" section for a description of the
+#   above parameters.
+data_ready_pin:
+#   Pin connected to the ADS1220 data ready line. This parameter must
+#   be provided.
+#gain: 128
+#   Valid gain values are 128, 64, 32, 16, 8, 4, 2, 1
+#   The default is 128
+#sample_rate: 660
+#   This chip supports two ranges of sample rates, Normal and Turbo. In turbo
+#   mode the chips c internal clock runs twice as fast and the SPI communication
+#   speed is also doubled. 
+#   Normal sample rates: 20, 45, 90, 175, 330, 600, 1000
+#   Turbo sample rates: 40, 90, 180, 350, 660, 1200, 2000
+#   The default is `660`
 ```
 
 ## Board specific hardware support

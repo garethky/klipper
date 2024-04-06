@@ -21,11 +21,9 @@ RREG_CMD = 0x20
 WREG_CMD = 0x40
 NOOP_CMD = 0x0
 
-
 # turn bytearrays into pretty hex strings: [0xff, 0x1]
 def hexify(byte_array):
-    return "[%s]" % (",".join([hex(b) for b in byte_array]))
-
+    return "[%s]" % (", ".join([hex(b) for b in byte_array]))
 
 class ADS1220(BulkSensorAdc, LoadCellEndstopSensor):
     def __init__(self, config):
@@ -182,12 +180,8 @@ class ADS1220(BulkSensorAdc, LoadCellEndstopSensor):
 
     def read_reg(self, reg, byte_count):
         read_command = [RREG_CMD | (reg << 2) | (byte_count - 1)]
-        logging.info(read_command)
         read_command += [NOOP_CMD] * byte_count
-        logging.info(read_command)
         params = self.spi.spi_transfer(read_command)
-        logging.info(read_command)
-        logging.info(params)
         return bytearray(params['response'][1:])
 
     def send_command(self, cmd):
@@ -196,7 +190,6 @@ class ADS1220(BulkSensorAdc, LoadCellEndstopSensor):
     def write_reg(self, reg, register_bytes):
         write_command = [WREG_CMD | (reg << 2) | (len(register_bytes) - 1)]
         write_command.extend(register_bytes)
-        logging.info(hexify(write_command))
         self.spi.spi_send(write_command)
         stored_val = self.read_reg(reg, len(register_bytes))
         stored_hex = hexify(stored_val)
@@ -206,7 +199,3 @@ class ADS1220(BulkSensorAdc, LoadCellEndstopSensor):
                 "Failed to set ADS1220 register [0x%x] to %s: got %s. "
                 "This may be a connection problem (e.g. faulty wiring)" % (
                     reg, val_hex, stored_hex))
-
-
-def load_config(config):
-    return ADS1220(config)
