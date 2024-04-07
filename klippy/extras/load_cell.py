@@ -478,7 +478,7 @@ def load_config(config):
     # Sensor types
     sensors = {}
     sensors.update(hx71x.HX71X_SENSOR_TYPES)
-    sensors.update({"ads1220": ads1220.ADS1220})
+    sensors.update(ads1220.ADS1220_SENSOR_TYPE)
     sensor_class = config.getchoice('sensor_type', sensors)
     return LoadCell(config, sensor_class(config))
 

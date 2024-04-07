@@ -199,3 +199,5 @@ class ADS1220(BulkSensorAdc, LoadCellEndstopSensor):
                 "Failed to set ADS1220 register [0x%x] to %s: got %s. "
                 "This may be a connection problem (e.g. faulty wiring)" % (
                     reg, val_hex, stored_hex))
+
+ADS1220_SENSOR_TYPE = {"ads1220": ADS1220}
