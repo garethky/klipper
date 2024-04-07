@@ -60,7 +60,8 @@ clear_flag(uint8_t mask, struct ads1220_adc *ads1220)
 static uint_fast8_t
 ads1220_event(struct timer *timer)
 {
-    struct ads1220_adc *ads1220 = container_of(timer, struct ads1220_adc, timer);
+    struct ads1220_adc *ads1220 = container_of(timer, struct ads1220_adc,
+                                                timer);
     set_flag(FLAG_PENDING, ads1220);
     sched_wake_task(&wake_ads1220);
     return SF_DONE;
@@ -96,7 +97,8 @@ add_sample(struct ads1220_adc *ads1220, uint_fast32_t counts)
 static void
 flush_samples(struct ads1220_adc *ads1220, uint8_t oid)
 {
-    if (ads1220->sb.data_count + BYTES_PER_SAMPLE > ARRAY_SIZE(ads1220->sb.data)) {
+    if ((ads1220->sb.data_count + BYTES_PER_SAMPLE) >
+            ARRAY_SIZE(ads1220->sb.data)) {
         sensor_bulk_report(&ads1220->sb, oid);
     }
 }
@@ -118,7 +120,7 @@ ads1220_read_adc(struct ads1220_adc *ads1220, uint8_t oid)
     
     if (time_diff >= MAX_SPI_READ_TIME) {
         // some IRQ delayed this read so much that its unusable
-        output("ADS1220 read timing error, read took too long %i > %i", time_diff, MAX_SPI_READ_TIME);
+        shutdown("ADS1220 read timing error, read took too long");
     }
 
     // extend 2's complement 24 bits to 32 bits
@@ -127,12 +129,12 @@ ads1220_read_adc(struct ads1220_adc *ads1220, uint8_t oid)
     int32_t counts = (counts_original ^ m) - m;
 
     if (counts == -1) {
-        output("ADS1220: Possible bad read: %i, %i", counts, counts_original);
+        shutdown("ADS1220: Possible bad read");
     }
 
     if (counts >= 0x800000) {
         counts |= 0xFF000000;
-        output("ADS1220: Invalid Counts: %i", counts);
+        shutdown("ADS1220: Invalid Counts");
     }
     add_sample(ads1220, counts);
 

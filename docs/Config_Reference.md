@@ -4574,46 +4574,51 @@ z_offset:
 
 ## Bulk ADC Sensors
 
-Klipper includes support for ADC chips that can sample at a high data rate.
-These sensors may be used in any config section that requires a Bulk ADC (such
-as a `[load_cell]`).
+Klipper includes support for generic Analog to Digital Converter (ADC) chips
+that can sample at a high data rate. These sensors measure a voltage that can be
+converted into various measurements (temperature, force etc.) by other modules.
+These sensors may be used in any config section that accepts a Bulk ADC (such as
+a `[load_cell]`).
 
 ### XH711
-This is a 24 bit low sample rate chip suitable for filament scales.
+This is a 24 bit low sample rate chip using "bit-bang" communications. It is
+suitable for filament scales.
 ```
 sensor_type: hx711
 sclk_pin:
-#   connected to the clock pin
+#   The pin connected to the HX711 clock line. This parameter must be provided.
 dout_pin:
-#   connected to the data output pin
+#   The pin connected to the HX711 data output line. This parameter must be
+#   provided.
 #gain: A-128
-#   Valid values for `gain` are `A-128`, `A-64`, `B-32`. The default is `A-128`.
-#   `A` denotes the input channel and the number denotes the gain. Only the 3
+#   Valid values for gain are: A-128, A-64, B-32. The default is A-128.
+#   'A' denotes the input channel and the number denotes the gain. Only the 3
 #   listed combinations are supported by the chip. Note that changing the gain
 #   setting also selects the channel being read.
 #sample_rate: 80
-#   Valid values for `sample_rate` are `10` or `80`. The default value is `80`.
+#   Valid values for sample_rate are 80 or 10. The default value is 80.
 #   This must match the wiring of the chip. The sample rate cannot be changed
 #   in software.
 ```
 
 ### HX717
-This is the higher sample rate version of the HX711, suitable for probes.
+This is the 4x higher sample rate version of the HX711, suitable for probing.
 ```
 sensor_type: hx717
 sclk_pin:
-#   connected to the clock pin
+#   The pin connected to the HX717 clock line. This parameter must be provided.
 dout_pin:
-#   connected to the data output pin
+#   The pin connected to the HX717 data output line. This parameter must be
+#   provided.
 #gain: A-128
-#   Valid values for `gain` are `A-128`, `B-64`, `A-64`, `B-8`.
-#   `A` denotes the input channel and the number denotes the gain setting.
+#   Valid values for gain are A-128, B-64, A-64, B-8.
+#   'A' denotes the input channel and the number denotes the gain setting.
 #   Only the 4 listed combinations are supported by the chip. Note that
 #   changing the gain setting also selects the channel being read.
 #sample_rate: 320
-#   Valid values for `sample_rate` are `320`, `80`, `20` or `10`.
-#   The default is `320`. This must match the wiring of the chip. The sample
-#   rate cannot be changed in software.
+#   Valid values for sample_rate are: 10, 20, 80, 320. The default is 320.
+#   This must match the wiring of the chip. The sample rate cannot be changed
+#   in software.
 ```
 
 ### ADS1220
@@ -4622,7 +4627,7 @@ software.
 ```
 sensor_type: ads1220
 cs_pin:
-#   The pin corresponding to the ADS1220 chip select line. This parameter must
+#   The pin connected to the ADS1220 chip select line. This parameter must
 #   be provided.
 #spi_speed: 512000
 #   This chip supports 2 speeds: 256000 or 512000. The faster speed is only
@@ -4635,8 +4640,8 @@ cs_pin:
 #   See the "common SPI settings" section for a description of the
 #   above parameters.
 data_ready_pin:
-#   Pin connected to the ADS1220 data ready line. This parameter must
-#   be provided.
+#   Pin connected to the ADS1220 data ready line. This parameter must be
+#   provided.
 #gain: 128
 #   Valid gain values are 128, 64, 32, 16, 8, 4, 2, 1
 #   The default is 128
