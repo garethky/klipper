@@ -120,14 +120,12 @@ class HX71xBase(BulkSensorAdc, LoadCellEndstopSensor):
                                      self.blocks_per_msg)
         for params in raw_samples:
             timestamps.update_sequence(params['sequence'])
-            logging.info("Hx717 Data: %s " % (params['data'],))
             data = bytearray(params['data'])
             for i in range(len(data) // BYTES_PER_SAMPLE):
                 counts = unpack_block(data, offset=BYTES_PER_SAMPLE * i)
                 msg = (timestamps.time_of_msg(i), sum(counts)) + counts
                 samples.append(msg)
         timestamps.set_last_chip_clock()
-        logging.info("HX717 Samples: %s", (samples,))
         return list(samples)
 
     # Start, stop, and process message batches
@@ -141,6 +139,9 @@ class HX71xBase(BulkSensorAdc, LoadCellEndstopSensor):
         self.clock_updater.note_start()
 
     def _finish_measurements(self):
+        # dont use serial queue during shutdown
+        if self.printer.is_shutdown():
+            return
         # Halt bulk reading
         self.query_hx71x_cmd.send_wait_ack([self.oid, 0])
         self.bulk_queue.clear_samples()

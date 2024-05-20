@@ -95,7 +95,7 @@ hx71x_delay(hx71x_time_t start, hx71x_time_t ticks)
  ****************************************************************/
 // both HX717 and HX711 have 200ns min pulse time for clock pin on/off
 #define MIN_PULSE_TIME nsecs_to_ticks(200)
-#define MAX_READ_TIME timer_from_us(50)
+#define MAX_READ_TIME timer_from_us(200)
 
 // Event handler that wakes wake_hx71x() periodically
 static uint_fast8_t
@@ -112,7 +112,6 @@ static void
 hx71x_reschedule_timer(struct hx71x_adc *hx71x)
 {
     irq_disable();
-    hx71x->pending_flag = 1;
     hx71x->timer.waketime = timer_read_time() + hx71x->rest_ticks;
     sched_add_timer(&hx71x->timer);
     irq_enable();
@@ -181,7 +180,8 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
     }
 
     hx71x_time_t time_diff = timer_read_time() - start_time;
-    if (time_diff >= MAX_READ_TIME) {
+    //if (time_diff >= MAX_READ_TIME) {
+    if (time_diff >= hx71x->rest_ticks) {
         shutdown("HX71x Read took too long");
     }
 
@@ -201,6 +201,7 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
     }
 
     flush_samples(hx71x, oid);
+    hx71x->pending_flag = 0;
     hx71x_reschedule_timer(hx71x);
 }
 
