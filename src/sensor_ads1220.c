@@ -36,7 +36,6 @@ static struct task_wake wake_ads1220;
 /****************************************************************
  * ADS1220 Sensor Support
  ****************************************************************/
-#define MAX_SPI_READ_TIME timer_from_us(150)
 
 static inline uint8_t
 is_flag_set(const uint8_t mask, struct ads1220_adc *ads1220)
@@ -118,7 +117,7 @@ ads1220_read_adc(struct ads1220_adc *ads1220, uint8_t oid)
     spidev_transfer(ads1220->spi, 1, sizeof(msg), msg);
     uint32_t time_diff = timer_read_time() - start_time;
     
-    if (time_diff >= MAX_SPI_READ_TIME) {
+    if (time_diff >= ads1220->rest_ticks >> 1) {
         // some IRQ delayed this read so much that its unusable
         shutdown("ADS1220 read timing error, read took too long");
     }

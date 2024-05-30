@@ -95,7 +95,6 @@ hx71x_delay(hx71x_time_t start, hx71x_time_t ticks)
  ****************************************************************/
 // both HX717 and HX711 have 200ns min pulse time for clock pin on/off
 #define MIN_PULSE_TIME nsecs_to_ticks(200)
-#define MAX_READ_TIME timer_from_us(200)
 
 // Event handler that wakes wake_hx71x() periodically
 static uint_fast8_t
@@ -141,17 +140,6 @@ flush_samples(struct hx71x_adc *hx71x, uint8_t oid)
         sensor_bulk_report(&hx71x->sb, oid);
 }
 
-// Pulse all clock pins to move to the next bit
-inline static void
-hx71x_pulse_clocks(struct hx71x_adc *hx71x) {
-    irq_disable();
-    gpio_out_write(hx71x->sclk, 1);
-    hx71x_delay_no_irq(hx71x_get_time(), MIN_PULSE_TIME);
-    gpio_out_write(hx71x->sclk, 0);
-    hx71x_delay_no_irq(hx71x_get_time(), MIN_PULSE_TIME);
-    irq_enable();
-}
-
 // hx71x ADC query
 void
 hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
@@ -163,25 +151,44 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
 
     // data is ready
     int32_t counts = 0;
-    hx71x_time_t start_time = timer_read_time();
+    uint8_t is_ready = 0;
+    hx71x_time_t start_time = hx71x_get_time();
+    hx71x_time_t end_time = 0;
     for (uint_fast8_t sample_idx = 0; sample_idx < 24; sample_idx++) {
-        hx71x_pulse_clocks(hx71x);
+        irq_disable();
+        gpio_out_write(hx71x->sclk, 1);
+        hx71x_delay_no_irq(hx71x_get_time(), MIN_PULSE_TIME);
+        gpio_out_write(hx71x->sclk, 0);
+        end_time = hx71x_get_time();
+        irq_enable();
+        hx71x_delay(end_time, MIN_PULSE_TIME);
         // read 2's compliment int bits
         counts = (counts << 1) | gpio_in_read(hx71x->dout);
     }
 
     // bit bang 1 to 4 more bits to configure gain & channel for the next sample
     for (uint8_t gain_idx = 0; gain_idx < hx71x->gain_channel; gain_idx++) {
-        hx71x_pulse_clocks(hx71x);
+        irq_disable();
+        gpio_out_write(hx71x->sclk, 1);
+        hx71x_delay_no_irq(hx71x_get_time(), MIN_PULSE_TIME);
+        // the data ready pin is reset after the rising clock edge of the first
+        // configuration clock pulse
+        if (gain_idx == 0) {
+            is_ready = hx71x_is_data_ready(hx71x);
+        }
+        gpio_out_write(hx71x->sclk, 0);
+        end_time = hx71x_get_time();
+        irq_enable();
+        if ((gain_idx + 1) < hx71x->gain_channel) {
+            hx71x_delay(end_time, MIN_PULSE_TIME);
+        }
     }
 
-    if (hx71x_is_data_ready(hx71x)) {
+    if (is_ready) {
         shutdown("HX71x Sensor reporting data ready after read");
     }
 
-    hx71x_time_t time_diff = timer_read_time() - start_time;
-    //if (time_diff >= MAX_READ_TIME) {
-    if (time_diff >= hx71x->rest_ticks) {
+    if ((hx71x_get_time() - start_time) >= (hx71x->rest_ticks >> 1)) {
         shutdown("HX71x Read took too long");
     }
 
