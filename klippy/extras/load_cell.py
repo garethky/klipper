@@ -407,7 +407,7 @@ class LoadCell:
         configfile.set(self.config_name, 'counts_per_gram',
                        "%.5f" % (counts_per_gram,))
         configfile.set(self.config_name, 'reference_tare_counts',
-                       "%.5f" % (tare_counts,))
+                       "%i" % (tare_counts,))
         self.printer.send_event("load_cell:calibrate", self)
     def counts_to_grams(self, sample):
         if not self.is_calibrated() or not self.is_tared():

@@ -4,3 +4,7 @@ out
 .config
 .config.old
 klippy/.version
+klippy/extras/ktcclog.py
+klippy/extras/tool.py
+klippy/extras/toolgroup.py
+klippy/extras/toollock.py
