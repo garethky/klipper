@@ -74,6 +74,7 @@ class ADS1220():
                                          self.name,
                                          {'header': ('time', 'counts')})
         # Command Configuration
+        self.config_endstop_cmd = None
         mcu.add_config_cmd(
             "config_ads1220 oid=%d spi_oid=%d data_ready_pin=%s"
             % (self.oid, self.spi.get_oid(), self.data_ready_pin))
@@ -84,6 +85,8 @@ class ADS1220():
 
     def _build_config(self):
         cmdqueue = self.spi.get_command_queue()
+        self.query_ads1220_cmd = self.mcu.lookup_command(
+            "query_ads1220 oid=%c rest_ticks=%u", cq=cmdqueue)
         self.query_ads1220_cmd = self.mcu.lookup_command(
             "query_ads1220 oid=%c rest_ticks=%u", cq=cmdqueue)
         self.ffreader.setup_query_command("query_ads1220_status oid=%c",
@@ -103,6 +106,9 @@ class ADS1220():
     # add_client interface, direct pass through to bulk_sensor API
     def add_client(self, callback):
         self.batch_bulk.add_client(callback)
+
+    def attach_endstop(self, endstop_oid):
+        self.config_endstop_cmd.send_wait_ack([self.oid, endstop_oid])
 
     # Measurement decoding
     def _convert_samples(self, samples):
