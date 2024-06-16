@@ -116,6 +116,10 @@ config WANT_ADS1220
     bool
     depends on HAVE_GPIO_SPI
     default y
+config WANT_LOAD_CELL_ENDSTOP
+    bool
+    depends on WANT_HX71X || WANT_ADS1220
+    default y
 config WANT_SOFTWARE_I2C
     bool
     depends on HAVE_GPIO && HAVE_GPIO_I2C
