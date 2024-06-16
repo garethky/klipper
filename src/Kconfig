@@ -132,6 +132,10 @@ config WANT_SENSOR_ANGLE
     bool
     depends on HAVE_GPIO_SPI
     default y
+config WANT_LOAD_CELL_ENDSTOP
+    bool
+    depends on WANT_HX71X || WANT_ADS1220
+    default y
 config WANT_SOFTWARE_I2C
     bool
     depends on HAVE_GPIO && HAVE_GPIO_I2C
@@ -147,7 +151,7 @@ config NEED_SENSOR_BULK
     default y
 config NEED_SOS_FILTER
     bool
-    depends on WANT_HX71X || WANT_ADS1220
+    depends on WANT_LOAD_CELL_ENDSTOP
     default y
 menu "Optional features (to reduce code size)"
     depends on HAVE_LIMITED_CODE_SIZE
