@@ -3,9 +3,9 @@
 # Copyright (C) 2023 Gareth Farrington <gareth@waves.ky>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging, math, chelper
+import logging, math
 import mcu
-from . import probe, load_cell, hx71x
+from . import probe, load_cell, hx71x, ads1220
 
 ######## Types
 
@@ -483,36 +483,217 @@ class TapAnalysis(object):
 def getfloatlist(config, option, above=None, below=None, max_len=None):
     values = config.getfloatlist(option, default=[])
     if max_len is not None and len(values) > max_len:
-        config.error("Option '%s' in section '%s' must have maximum length %s"
-                     % (option, config.get_name(), max_len))
+        raise config.error("Option '%s' in section '%s' must have maximum"
+                           " length %s" % (option, config.get_name(), max_len))
     for value in values:
         validatefloat(config, option, value, above, below)
     return values
 
 def validatefloat(config, option, value, above, below):
     if above is not None and value <= above:
-        config.error("Option '%s' in section '%s' must be above %s"
-                    % (option, config.get_name(), 1.0))
+        raise config.error("Option '%s' in section '%s' must be above %s"
+                    % (option, config.get_name(), above))
     if below is not None and value >= below:
-        config.error("Option '%s' in section '%s' must be below %s"
-                     % (option, config.get_name(), 1.0))
+        raise config.error("Option '%s' in section '%s' must be below %s"
+                     % (option, config.get_name(), below))
 
 NOZZLE_CLEANER = "{action_respond_info(\"Bad tap detected, nozzle needs" \
         " cleaning. nozzle_cleaner_gcode not configured!\")}"
+# Helper to track multiple probe attempts in a single command
+class LoadCellProbeSessionHelper:
+    def __init__(self, config, mcu_probe):
+        self.printer = config.get_printer()
+        self.mcu_probe = mcu_probe
+        gcode = self.printer.lookup_object('gcode')
+        self.dummy_gcode_cmd = gcode.create_gcode_command("", "", {})
+        # Infer Z position to move to during a probe
+        if config.has_section('stepper_z'):
+            zconfig = config.getsection('stepper_z')
+            self.z_position = zconfig.getfloat('position_min', 0.,
+                                               note_valid=False)
+        else:
+            pconfig = config.getsection('printer')
+            self.z_position = pconfig.getfloat('minimum_z_position', 0.,
+                                               note_valid=False)
+        self.homing_helper = probe.HomingViaProbeHelper(config, mcu_probe)
+        # Configurable probing speeds
+        self.speed = config.getfloat('speed', 5.0, above=0.)
+        self.lift_speed = config.getfloat('lift_speed', self.speed, above=0.)
+        # Multi-sample support (for improved accuracy)
+        self.sample_count = config.getint('samples', 1, minval=1)
+        self.sample_retract_dist = config.getfloat('sample_retract_dist', 2.,
+                                                   above=0.)
+        atypes = {'median': 'median', 'average': 'average'}
+        self.samples_result = config.getchoice('samples_result', atypes,
+                                               'average')
+        self.samples_tolerance = config.getfloat('samples_tolerance', 0.100,
+                                                 minval=0.)
+        self.samples_retries = config.getint('samples_tolerance_retries', 0,
+                                             minval=0)
+        # Session state
+        self.multi_probe_pending = False
+        self.results = []
+        # Register event handlers
+        self.printer.register_event_handler("gcode:command_error",
+                                            self._handle_command_error)
+        # load cell probe options
+        self.bad_tap_retries = config.getint('bad_tap_retries', 1, minval=0)
+        self.nozzle_cleaner_module = self.load_module(
+                                        config, 'nozzle_cleaner_module', None)
+        gcode_macro = self.printer.load_object(config, 'gcode_macro')
+        self.nozzle_cleaner_gcode = gcode_macro.load_template(config,
+                                    'nozzle_cleaner_gcode', NOZZLE_CLEANER)
+
+    def _handle_command_error(self):
+        if self.multi_probe_pending:
+            try:
+                self.end_probe_session()
+            except:
+                logging.exception("Multi-probe end")
+
+    def _probe_state_error(self):
+        raise self.printer.command_error(
+            "Internal probe error - start/end probe session mismatch")
+
+    def load_module(self, config, name, default):
+        module = config.get(name, default=None)
+        return default if module is None else self.printer.lookup_object(module)
+
+    def start_probe_session(self, gcmd):
+        if self.multi_probe_pending:
+            self._probe_state_error()
+        self.mcu_probe.multi_probe_begin()
+        self.multi_probe_pending = True
+        self.results = []
+        return self
+
+    def end_probe_session(self):
+        if not self.multi_probe_pending:
+            self._probe_state_error()
+        self.results = []
+        self.multi_probe_pending = False
+        self.mcu_probe.multi_probe_end()
+
+    def get_probe_params(self, gcmd=None):
+        if gcmd is None:
+            gcmd = self.dummy_gcode_cmd
+        probe_speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.)
+        lift_speed = gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.)
+        samples = gcmd.get_int("SAMPLES", self.sample_count, minval=1)
+        sample_retract_dist = gcmd.get_float("SAMPLE_RETRACT_DIST",
+                                             self.sample_retract_dist, above=0.)
+        samples_tolerance = gcmd.get_float("SAMPLES_TOLERANCE",
+                                           self.samples_tolerance, minval=0.)
+        samples_retries = gcmd.get_int("SAMPLES_TOLERANCE_RETRIES",
+                                       self.samples_retries, minval=0)
+        samples_result = gcmd.get("SAMPLES_RESULT", self.samples_result)
+        return {'probe_speed': probe_speed,
+                'lift_speed': lift_speed,
+                'samples': samples,
+                'sample_retract_dist': sample_retract_dist,
+                'samples_tolerance': samples_tolerance,
+                'samples_tolerance_retries': samples_retries,
+                'samples_result': samples_result}
+
+    # execute nozzle cleaning routine
+    def clean_nozzle(self, retries):
+        #TODO: what params to pass to nozzle cleaners?
+        # [X,Y,Z] of the failed probe?
+        # original requested probe location
+        # how many times this has happened?
+        if self.nozzle_cleaner_module is not None:
+            self.nozzle_cleaner_module.clean_nozzle()
+        else:
+            macro = self.nozzle_cleaner_gcode
+            context = macro.create_template_context()
+            context['params'] = {
+                'RETRIES': retries,
+            }
+            macro.run_gcode_from_command(context)
+
+    def single_tap(self, speed):
+        toolhead = self.printer.lookup_object('toolhead')
+        curtime = self.printer.get_reactor().monotonic()
+        if 'z' not in toolhead.get_status(curtime)['homed_axes']:
+            raise self.printer.command_error("Must home before probe")
+        pos = toolhead.get_position()
+        pos[2] = self.z_position
+        try:
+            epos, is_good = self.mcu_probe.tapping_move(pos, speed)
+        except self.printer.command_error as e:
+            reason = str(e)
+            if "Timeout during endstop homing" in reason:
+                reason += probe.HINT_TIMEOUT
+            raise self.printer.command_error(reason)
+        # Allow axis_twist_compensation to update results
+        self.printer.send_event("probe:update_results", epos)
+        # Report results
+        gcode = self.printer.lookup_object('gcode')
+        gcode.respond_info("probe at %.3f,%.3f is z=%.6f"
+                           % (epos[0], epos[1], epos[2]))
+        return epos[:3], is_good
+
+    def probe_cycle(self, probexy, params):
+        retries = 0
+        while retries <= self.bad_tap_retries:
+            epos, is_good = self.single_tap(params['probe_speed'])
+            if is_good:
+                return epos
+            elif retries < self.bad_tap_retries:
+                self.retract(probexy, epos, params)
+                self.clean_nozzle(retries)
+                # TODO: maybe goto the probing location after cleaning?
+            else:
+                raise self.printer.command_error(
+                    'Bad taps exceeded bas_tap_retries')
+
+    def retract(self, probexy, pos, params):
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.manual_move(
+            probexy + [pos[2] + params['sample_retract_dist']],
+            params['lift_speed'])
+
+    def run_probe(self, gcmd):
+        if not self.multi_probe_pending:
+            self._probe_state_error()
+        params = self.get_probe_params(gcmd)
+        toolhead = self.printer.lookup_object('toolhead')
+        probexy = toolhead.get_position()[:2]
+        retries = 0
+        positions = []
+        sample_count = params['samples']
+        while len(positions) < sample_count:
+            # Probe position
+            pos = self.probe_cycle(probexy, params)
+            positions.append(pos)
+            # Check samples tolerance
+            z_positions = [p[2] for p in positions]
+            if max(z_positions)-min(z_positions) > params['samples_tolerance']:
+                if retries >= params['samples_tolerance_retries']:
+                    raise gcmd.error("Probe samples exceed samples_tolerance")
+                gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
+                retries += 1
+                positions = []
+            # Retract
+            if len(positions) < sample_count:
+                self.retract(probexy, pos, params)
+        # Calculate result
+        epos = probe.calc_probe_z_average(positions, params['samples_result'])
+        self.results.append(epos)
+    def pull_probed_results(self):
+        res = self.results
+        self.results = []
+        return res
+
 #class to keep context across probing/homing events
 class ProbeSessionContext():
-    def __init__(self, config, load_cell):
+    def __init__(self, config, load_cell_inst):
         self.printer = printer = config.get_printer()
-        self.load_cell = load_cell
+        self.load_cell = load_cell_inst
         self.collector = None
         self.pullback_distance = config.getfloat('pullback_dist', minval=0.01,
                                                  maxval=2.0, default=0.1)
-        sps = self._load_cell.get_sensor().get_samples_per_second()
-        # Collect 4x60hz power cycles of data to average across power noise
-        default_tare_samples = max(2, round(sps * ((1 / 60) * 4)))
-        self.tare_samples = config.getfloat('tare_samples',
-                                            default=default_tare_samples,
-                                            minval=2, maxval=sps)
+        sps = self.load_cell.get_sensor().get_samples_per_second()
         # TODO: Math: set the maximum pullback speed such that at least
         # enough samples will be collected
         # e.g. 5 + 1 + (2 * discard)
@@ -525,12 +706,6 @@ class ProbeSessionContext():
                                                    default=0.3)
         self.bad_tap_module = self.load_module(config, 'bad_tap_module',
                                                BadTapModule())
-        self.nozzle_cleaner_module = self.load_module(config,
-                                                      'nozzle_cleaner_module',
-                                                      None)
-        gcode_macro = printer.load_object(config, 'gcode_macro')
-        self.nozzle_cleaner_gcode = gcode_macro.load_template(config,
-                                    'nozzle_cleaner_gcode', NOZZLE_CLEANER)
         # optional filter config
         tap_notches = getfloatlist(config, "tap_filter_notch", above=0,
                                    below=math.floor(sps / 2.), max_len=5)
@@ -549,34 +724,6 @@ class ProbeSessionContext():
         module = config.get(name, default=None)
         return default if module is None else self.printer.lookup_object(module)
 
-    # execute nozzle cleaning routine
-    def clean_nozzle(self, retries):
-        #TODO: what params to pass to nozzle cleaners?
-        # X,Y,Z of the failed probe?
-        # original requested probe location
-        # how many times this has happened?
-        if self.nozzle_cleaner_module is not None:
-            self.nozzle_cleaner_module.clean_nozzle()
-        else:
-            macro = self.nozzle_cleaner_gcode
-            context = macro.create_template_context()
-            context['params'] = {
-                'RETRIES': retries,
-            }
-            macro.run_gcode_from_command(context)
-
-    # pauses for the last move to complete and then tares the load_cell
-    # returns the last sample record used in taring
-    def pause_and_tare(self):
-        import numpy as np
-        toolhead = self.printer.lookup_object('toolhead')
-        collector = self.load_cell.get_collector()
-        # collect tare_samples AFTER current move ends
-        collector.collect_until(toolhead.get_last_move_time())
-        tare_samples = collector.collect_min(self.tare_samples)
-        tare_counts = np.average(np.array(tare_samples)[:, 2].astype(float))
-        self.set_endstop_range(int(tare_counts))
-
     # Perform the pullback move and returns the time when the move will end
     def pullback_move(self):
         toolhead = self.printer.lookup_object('toolhead')
@@ -587,11 +734,33 @@ class ProbeSessionContext():
         pullback_end = toolhead.get_last_move_time()
         return pullback_end
 
-    def start_probe(self, print_time):
+    def notify_probe_start(self, print_time):
         if self.collector is not None:
-            self.collector.stop_collecting()
+            self.collector.start_collecting(print_time)
+
+    def tapping_move(self, mcu_probe, pos, speed):
         self.collector = self.load_cell.get_collector()
-        self.collector.start_collecting(print_time)
+        toolhead = self.printer.lookup_object('toolhead')
+        curtime = self.printer.get_reactor().monotonic()
+        if 'z' not in toolhead.get_status(curtime)['homed_axes']:
+            raise self.printer.command_error("Must home before probe")
+        phoming = self.printer.lookup_object('homing')
+        epos = phoming.probing_move(mcu_probe, pos, speed)
+        pullback_end_time = self.pullback_move()
+        pullback_end_pos = toolhead.get_position()
+        samples = self.collector.collect_until(pullback_end_time
+                                               + self.pullback_extra_time)
+        self.collector = None
+        ppa = TapAnalysis(self.printer, samples, self.tap_filter)
+        ppa.analyze()
+        # broadcast tap event data:
+        self.wh_helper.send({'tap': ppa.to_dict()})
+        is_good = ppa.is_valid and not self.bad_tap_module.is_bad_tap(ppa)
+        if is_good:
+            epos[2] = ppa.tap_pos[2]
+        else:
+            epos = pullback_end_pos[:3]
+        return epos, is_good
 
 
 WATCHDOG_MAX = 3
@@ -609,8 +778,8 @@ class LoadCellEndstop:
         self._load_cell = load_cell_inst
         self._helper = helper
         self._sensor = sensor = load_cell_inst.get_sensor()
-        self._mcu = mcu = sensor.get_mcu()
-        self._oid = mcu.create_oid()
+        self._mcu = sensor.get_mcu()
+        self._oid = self._mcu.create_oid()
         self._dispatch = mcu.TriggerDispatch(self._mcu)
         self._rest_time = 1. / float(sensor.get_samples_per_second())
         self.settling_time = config.getfloat('settling_time', default=0.375,
@@ -624,10 +793,13 @@ class LoadCellEndstop:
         #TODO: Review: In my view, this should always be 1
         self.trigger_count = config.getint("trigger_count",
                                            default=1, minval=1, maxval=5)
-        self.collector = None
-        self._was_bad_tap = False
         # optional continuous tearing
         sps = self._load_cell.get_sensor().get_samples_per_second()
+        # Collect 4x60hz power cycles of data to average across power noise
+        default_tare_samples = max(2, round(sps * ((1 / 60) * 4)))
+        self.tare_samples = config.getfloat('tare_samples',
+                                            default=default_tare_samples,
+                                            minval=2, maxval=sps)
         max_filter_frequency = math.floor(sps / 2.)
         hp_option = "continuous_tare_highpass"
         highpass = config.getfloat(hp_option, minval=0.1,
@@ -642,8 +814,8 @@ class LoadCellEndstop:
             'continuous_tare_trigger_force',
             minval=1., maxval=250., default=40.)
         if (lowpass or notches) and highpass is None:
-            config.error("Option %s is section %s must be set to use continuous"
-                         " tare" % (hp_option, config.get_name(),))
+            raise config.error("Option %s is section %s must be set to use"
+                    " continuous tare" % (hp_option, config.get_name(),))
 
         self._continuous_tare_filter = DigialFilter(sps, config.error, highpass,
                                                 lowpass, notches, notch_quality)
@@ -664,7 +836,7 @@ class LoadCellEndstop:
         self.tare_counts = 0
         self.last_trigger_time = 0
         self._config_commands()
-        mcu.register_config_callback(self._build_config)
+        self._mcu.register_config_callback(self._build_config)
         printer.register_event_handler("klippy:ready", self._ready_handler)
         printer.register_event_handler("load_cell:tare",
                                        self._handle_load_cell_tare)
@@ -762,6 +934,18 @@ class LoadCellEndstop:
 
         self._set_range_cmd.send(args)
 
+    # pauses for the last move to complete and then tares the load_cell
+    # returns the last sample record used in taring
+    def pause_and_tare(self):
+        import numpy as np
+        toolhead = self.printer.lookup_object('toolhead')
+        collector = self._load_cell.get_collector()
+        # collect tare_samples AFTER current move ends
+        collector.collect_until(toolhead.get_last_move_time())
+        tare_samples = collector.collect_min(self.tare_samples)
+        tare_counts = np.average(np.array(tare_samples)[:, 2].astype(float))
+        self.set_endstop_range(int(tare_counts))
+
     def get_oid(self):
         return self._oid
 
@@ -794,8 +978,7 @@ class LoadCellEndstop:
         print_time = self._mcu.estimated_print_time(now) + MIN_MSG_TIME
         clock = self._mcu.print_time_to_clock(print_time)
         # collector only used when probing
-        if self.collector is not None:
-            self.collector.start_collecting(print_time)
+        self._helper.notify_probe_start(print_time)
         trigger_completion = self._dispatch.start(print_time)
         rest_ticks = self._mcu.seconds_to_clock(self._rest_time)
         self._home_cmd.send([self._oid, self._dispatch.get_oid(),
@@ -839,41 +1022,10 @@ class LoadCellEndstop:
 
     # Interface for ProbeEndstopWrapper
     def probing_move(self, pos, speed):
-        self.collector = self._load_cell.get_collector()
-        toolhead = self.printer.lookup_object('toolhead')
-        curtime = self.printer.get_reactor().monotonic()
-        if 'z' not in toolhead.get_status(curtime)['homed_axes']:
-            raise self.printer.command_error("Must home before probe")
-        phoming = self.printer.lookup_object('homing')
-        #pos = toolhead.get_position()
-        pos[2] = self.z_position
-        try:
-            epos = phoming.probing_move(self.mcu_probe, pos, speed)
-        except self.printer.command_error as e:
-            self.collector.stop_collecting()
-            self.collector = None
-            reason = str(e)
-            if "Timeout during endstop homing" in reason:
-                reason += probe.HINT_TIMEOUT
-            raise self.printer.command_error(reason)
-        pullback_end_time = self._pullback_move()
-        pullback_end_pos = toolhead.get_position()
-        samples = self.collector.collect_until(pullback_end_time
-                                               + self.pullback_extra_time)
-        self.collector = None
-        ppa = TapAnalysis(self.printer, samples, self.tap_filter)
-        ppa.analyze()
-        # broadcast tap event data:
-        self.wh_helper.send({'tap': ppa.to_dict()})
-        self._was_bad_tap = True
-        if ppa.is_valid:
-            self._was_bad_tap = self.bad_tap_module.is_bad_tap(ppa)
-            if not self._was_bad_tap:
-                epos[2] = ppa.tap_pos[2]
-                self.gcode.respond_info("probe at %.3f,%.3f is z=%.6f"
-                                % (epos[0], epos[1], epos[2]))
-                return epos[:3]
-        return pullback_end_pos[:3]
+        raise self.printer.command_error("Not Implemented")
+
+    def tapping_move(self, pos, speed):
+        return self._helper.tapping_move(self, pos, speed)
 
     def multi_probe_begin(self):
         pass
@@ -891,18 +1043,15 @@ class LoadCellEndstop:
         return self.position_endstop
 
 
-
 class LoadCellPrinterProbe():
     def __init__(self, config, load_cell_inst, load_cell_endstop):
         self.printer = config.get_printer()
         self.mcu_probe = load_cell_endstop
         self._load_cell = load_cell_inst
-        self.probe_helper = ProbeSessionContext(config, load_cell_inst,
-                                                load_cell_endstop)
         self.cmd_helper = probe.ProbeCommandHelper(config, self,
                                              self.mcu_probe.query_endstop)
         self.probe_offsets = probe.ProbeOffsetsHelper(config)
-        self.probe_session = probe.ProbeSessionHelper(config, self.mcu_probe)
+        self.probe_session = LoadCellProbeSessionHelper(config, self.mcu_probe)
 
     # Copy of PrinterProbe methods
     def get_probe_params(self, gcmd=None):
@@ -920,67 +1069,12 @@ class LoadCellPrinterProbe():
         status.update(self.mcu_probe.get_status(eventtime))
         return status
 
-    # Override, moved to ProbeSessionHelper
-    def run_probe(self, gcmd):
-        speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.)
-        lift_speed = self.get_lift_speed(gcmd)
-        sample_count = gcmd.get_int("SAMPLES", self.sample_count, minval=1)
-        sample_retract_dist = gcmd.get_float("SAMPLE_RETRACT_DIST",
-                                             self.sample_retract_dist, above=0.)
-        samples_tolerance = gcmd.get_float("SAMPLES_TOLERANCE",
-                                           self.samples_tolerance, minval=0.)
-        samples_retries = gcmd.get_int("SAMPLES_TOLERANCE_RETRIES",
-                                       self.samples_retries, minval=0)
-        samples_result = gcmd.get("SAMPLES_RESULT", self.samples_result)
-        must_notify_multi_probe = not self.multi_probe_pending
-        if must_notify_multi_probe:
-            self.multi_probe_begin()
-        probe_xy = self.printer.lookup_object('toolhead').get_position()[:2]
-        retries = 0
-        positions = []
-        while len(positions) < sample_count:
-            # Probe position
-            logging.info("probe start")
-            probe_pos = self._probe(speed)
-            logging.info("probe complete")
-            # handle bad taps by cleaning and retry:
-            if self._was_bad_tap:
-                if retries >= samples_retries:
-                    raise gcmd.error("Probe had too many retries")
-                gcmd.respond_info("Bad tap detected. Cleaning Nozzle...")
-                # tap was invalid or bad, clean nozzle
-                self._clean_nozzle(retries)
-                gcmd.respond_info("Retrying Probe...")
-                retries += 1
-            else:
-                positions.append(probe_pos)
-                # Check samples tolerance
-                z_positions = [p[2] for p in positions]
-                if max(z_positions) - min(z_positions) > samples_tolerance:
-                    if retries >= samples_retries:
-                        raise gcmd.error("Probe samples exceed \
-                            samples_tolerance")
-                    gcmd.respond_info("Probe samples exceed tolerance. \
-                        Retrying...")
-                    retries += 1
-                    positions = []
-            # Retract
-            if len(positions) < sample_count:
-                logging.info("retract move start")
-                self._move(probe_xy + [probe_pos[2] + sample_retract_dist],
-                           lift_speed)
-                logging.info("retract move complete")
-        if must_notify_multi_probe:
-            self.multi_probe_end()
-        # Calculate and return result
-        if samples_result == 'median':
-            return self._calc_median(positions)
-        return self._calc_mean(positions)
 
 def load_config(config):
     # Sensor types supported by load_cell_probe
     sensors = {}
     sensors.update(hx71x.HX71X_SENSOR_TYPES)
+    sensors.update(ads1220.ADS1220_SENSOR_TYPE)
     sensor_class = config.getchoice('sensor_type', sensors)
     sensor = sensor_class(config)
     lc = load_cell.LoadCell(config, sensor)
