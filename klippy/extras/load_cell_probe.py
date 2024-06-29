@@ -180,8 +180,8 @@ def lstsq_error(x, y):
     x = np.asarray(x)
     y = np.asarray(y)
     x_stacked = np.vstack([x, np.ones(len(x))]).T
-    residual = np.linalg.lstsq(x_stacked, y, rcond=None)[1][0]
-    return residual
+    residuals = np.linalg.lstsq(x_stacked, y, rcond=None)[1]
+    return residuals[0] if residuals else 0
 
 # Local best fit elbow finder, finds first point of decreasing fitness
 def find_two_lines_best_fit(x, y, search_direction=-1):
@@ -197,6 +197,7 @@ def find_two_lines_best_fit(x, y, search_direction=-1):
             min_error = error
         else:
             return i
+    raise "no elbow found!"
 
 # split a group of points into 2 lines using 1 elbow point
 # supports configurable number of discard points at the ends of the
@@ -224,26 +225,55 @@ def elbow_split(x, y, discard=None):
 def tap_decompose(time, force, homing_end_idx, pullback_start_idx,
                   discard=0):
     default_discard = [discard, discard, discard, discard]
-    compression_discard = [discard, discard, 0, 0]
     # compression elbow
-    start_time = time[0: homing_end_idx]
-    start_force = force[0: homing_end_idx]
-    # discard=0 because there are so few points in the compression line
-    # this technique works better there than kneedle when the probe is long
+    start_time = time[0:homing_end_idx]
+    start_force = force[0:homing_end_idx]
+    # this technique works better here than kneedle when the probe is long
     contact_elbow_idx = find_two_lines_best_fit(start_time, start_force, -1)
-    l1, l2 = split_to_lines(start_time, start_force, contact_elbow_idx,
-                            compression_discard)
+    # l1 is the approach line
+    l1 = lstsq_line(time[discard: contact_elbow_idx - discard],
+                    force[discard: contact_elbow_idx - discard])
+    # sometime after homing_end_idx was the peak force elbow and the start of
+    # the dwell line
+    post_contact_time = time[contact_elbow_idx:pullback_start_idx]
+    post_contact_force = force[contact_elbow_idx:pullback_start_idx]
+    logging.info("Key Points:"
+                 "contact_elbow_idx:%s, homing_end_idx:%s, pullback_start_idx:%s"
+                 % (contact_elbow_idx, homing_end_idx, pullback_start_idx,))
+    logging.info("post_contact_time.length: %s" % (len(post_contact_time)))
+    dwell_start_idx_a = contact_elbow_idx + find_two_lines_best_fit(post_contact_time, post_contact_force, 1)
+    dwell_start_idx = contact_elbow_idx + find_kneedle(post_contact_time, post_contact_force)
+    # l2 is the compression line, it may have very few points so do not discard
+
+    logging.info("Key Points:"
+                 "contact_elbow_idx:%s, homing_end_idx:%s, dwell_start_idx_a:%s, dwell_start_idx:%s, pullback_start_idx:%s"
+                 % (contact_elbow_idx, homing_end_idx, dwell_start_idx_a, dwell_start_idx, pullback_start_idx, ))
+    compression_length = dwell_start_idx - contact_elbow_idx
+    logging.info("compression line length: %s" % (compression_length,))
+    #if compression_length < 2:
+    #    raise "compression line is short!"
+
+    compression_time = time[contact_elbow_idx: dwell_start_idx]
+    compression_force = force[contact_elbow_idx: dwell_start_idx]
+    l2 = lstsq_line(compression_time, compression_force)
+    # probe contact point
     p1 = l1.intersection(l2)
+    # re-compute the dwell line to eliminate ringing effects
+    # discard the first 1/5th of the line because it can contain ringing
+    ringing_discard = ((pullback_start_idx - dwell_start_idx) // 5)
+
+    if ringing_discard < 0:   # 0, 278, 274
+        raise "ringing_discard is negative!!"
+    dwell_start = dwell_start_idx + ringing_discard
+    dwell_time = time[dwell_start: pullback_start_idx - discard]
+    dwell_force = force[dwell_start: pullback_start_idx - discard]
+    l3 = lstsq_line(dwell_time, dwell_force)
+
     # pullback elbow
     pullback_time = time[pullback_start_idx: -1]
     pullback_force = force[pullback_start_idx: -1]
     l4, p4, l5 = elbow_split(pullback_time, pullback_force, default_discard)
-    # dwell line:
-    # discard the first 1/5th of the line because it contains ringing
-    dwell_start = homing_end_idx + ((pullback_start_idx - homing_end_idx) // 5)
-    dwell_time = time[dwell_start: pullback_start_idx]
-    dwell_force = force[dwell_start: pullback_start_idx]
-    l3 = lstsq_line(dwell_time, dwell_force)
+
     # dwell line intersections:
     p2 = l3.intersection(l2)
     p3 = l3.intersection(l4)
@@ -371,8 +401,8 @@ class TapAnalysis(object):
         force = self.force
         time = self.time
         # find peak local maximum force after homing ends:
-        home_end_index = index_near(time, self.home_end_time)
-        pullback_start_index = index_near(time, self.pullback_start_time)
+        #home_end_index = index_near(time, self.home_end_time)
+        #pullback_start_index = index_near(time, self.pullback_start_time)
         # look forward for the next index where force decreases:
         # TODO: REVIEW: On my printer it is always true that the calculated
         # home_end_time is before peak force. Could this not be true for other
@@ -382,20 +412,21 @@ class TapAnalysis(object):
         # --|             --|
         #   | /----    vs   |  (K1)
         #   |/              |----
-        max_force = abs(force[home_end_index])
-        peak_force_index = home_end_index
-        for i in range(home_end_index + 1, pullback_start_index):
-            next_force = abs(force[i])
-            if next_force > max_force:
-                max_force = next_force
-                peak_force_index += 1
-            else:
-                break
-        if not self.validate_peak_force(peak_force_index, home_end_index):
-            logging.info('Peak force not close to endstop trigger time')
-            return
+        #max_force = abs(force[home_end_index])
+        #peak_force_index = home_end_index
+        #for i in range(home_end_index + 1, pullback_start_index):
+        #    next_force = abs(force[i])
+        #    if next_force > max_force:
+        #        max_force = next_force
+        #        peak_force_index += 1
+        #    else:
+        #        break
+        #if not self.validate_peak_force(peak_force_index, home_end_index):
+        #    logging.info('Peak force not close to endstop trigger time')
+        #    return
+        home_end_index = index_near(time, self.home_end_time)
         pullback_start_index = index_near(time, self.pullback_start_time)
-        points, lines = tap_decompose(time, force, peak_force_index,
+        points, lines = tap_decompose(time, force, home_end_index,
                             pullback_start_index, discard)
         self.tap_points = points
         self.tap_lines = lines
