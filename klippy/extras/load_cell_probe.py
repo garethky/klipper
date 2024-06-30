@@ -152,134 +152,100 @@ def index_near(time, instant):
     import numpy as np
     return int(np.argmax(np.asarray(time) >= instant) or len(time) -1)
 
-# Least Squares on x[] y[] points, returns ForceLine
-def lstsq_line(x, y):
-    import numpy as np
-    x = np.asarray(x)
-    y = np.asarray(y)
-    x_stacked = np.vstack([x, np.ones(len(x))]).T
-    mx, b = np.linalg.lstsq(x_stacked, y, rcond=None)[0]
-    return ForceLine(mx, b)
+# helper class for working with a time/force graph
+# work with subsections to find elbows and best fit lines
+class ForceGraph:
+    def __init__(self, time, force):
+        self.time = time
+        self.force = force
 
-# Kneedle algorithm, finds global absolute max elbow point
-def find_kneedle(x, y):
-    import numpy as np
-    x_coords = [x[0], x[-1]]
-    y_coords = [y[0], y[-1]]
-    line = lstsq_line(x_coords, y_coords)
-    # now compute the Y of the line value for every x
-    fit_y = []
-    for time in x:
-        fit_y.append(line.find_force(time))
-    fit_y = np.asarray(fit_y)
-    delta_y = np.absolute(fit_y - y)
-    return np.argmax(delta_y)
+    # Least Squares on x[] y[] points, returns ForceLine
+    def _lstsq_line(self, x, y):
+        import numpy as np
+        x = np.asarray(x)
+        y = np.asarray(y)
+        x_stacked = np.vstack([x, np.ones(len(x))]).T
+        mx, b = np.linalg.lstsq(x_stacked, y, rcond=None)[0]
+        return mx, b
 
-def lstsq_error(x, y):
-    import numpy as np
-    x = np.asarray(x)
-    y = np.asarray(y)
-    x_stacked = np.vstack([x, np.ones(len(x))]).T
-    residuals = np.linalg.lstsq(x_stacked, y, rcond=None)[1]
-    return residuals[0] if residuals else 0
+    def _lstsq_error(self, x, y):
+        import numpy as np
+        x = np.asarray(x)
+        y = np.asarray(y)
+        x_stacked = np.vstack([x, np.ones(len(x))]).T
+        residuals = np.linalg.lstsq(x_stacked, y, rcond=None)[1]
+        return residuals[0] if residuals else 0
 
-# Local best fit elbow finder, finds first point of decreasing fitness
-def find_two_lines_best_fit(x, y, search_direction=-1):
-    sweep = range(2, len(x) - 2)
-    if search_direction == -1:
-        sweep = reversed(sweep)
-    min_error = float('inf')
-    for i in sweep:
-        r1 = lstsq_error(x[0:i], y[0:i])
-        r2 = lstsq_error(x[i:], y[i:])
-        error = r1 + r2
-        if error < min_error:
-            min_error = error
-        else:
-            return i
-    raise "no elbow found!"
+    # Local best fit elbow finder, finds first point of decreasing fitness
+    def _two_lines_best_fit(self, x, y, search_direction):
+        sweep = range(2, len(x) - 2)
+        if search_direction == -1:
+            sweep = reversed(sweep)
+        min_error = float('inf')
+        for i in sweep:
+            r1 = self._lstsq_error(x[0:i], y[0:i])
+            r2 = self._lstsq_error(x[i:], y[i:])
+            error = r1 + r2
+            if error < min_error:
+                min_error = error
+            else:
+                return i
+        raise "no elbow found!"
 
-# split a group of points into 2 lines using 1 elbow point
-# supports configurable number of discard points at the ends of the
-# resulting lines
-def split_to_lines(x, y, elbow_index, discard=None):
-    discard = [0, 0, 0, 0] if discard is None else discard
-    l1 = lstsq_line(x[0 + discard[0]: elbow_index - discard[1]],
-                    y[0 + discard[0]: elbow_index - discard[1]])
-    l2 = lstsq_line(x[elbow_index + discard[2]: -1 - discard[3]],
-                    y[elbow_index + discard[2]: -1 - discard[3]])
-    return l1, l2
+    def _split(self, start_idx, end_idx, discard_left=0, discard_right=0):
+        t = self.time[start_idx + discard_left:end_idx - discard_right]
+        f = self.force[start_idx + discard_left:end_idx - discard_right]
+        return t, f
 
-# split a line into 2 parts by elbow. Return lines and intersection point
-def elbow_split(x, y, discard=None):
-    discard = [0, 0, 0, 0] if discard is None else discard
-    elbow_index = find_kneedle(x, y)
-    l1, l2 = split_to_lines(x, y, elbow_index, discard)
-    elbow_point = l1.intersection(l2)
-    return l1, elbow_point, l2
+    def find_elbow(self, start_idx, end_idx, search_direction=1):
+        t, f = self._split(start_idx, end_idx)
+        elbow = self._two_lines_best_fit(t, f, search_direction)
+        return start_idx + elbow
 
-# break a tap event down into 6 points and 5 lines:
-#    *-----*|       /*-----*
-#           |      /
-#           *----*/
-def tap_decompose(time, force, homing_end_idx, pullback_start_idx,
-                  discard=0):
-    default_discard = [discard, discard, discard, discard]
-    # compression elbow
-    start_time = time[0:homing_end_idx]
-    start_force = force[0:homing_end_idx]
-    # this technique works better here than kneedle when the probe is long
-    contact_elbow_idx = find_two_lines_best_fit(start_time, start_force, -1)
-    # l1 is the approach line
-    l1 = lstsq_line(time[discard: contact_elbow_idx - discard],
-                    force[discard: contact_elbow_idx - discard])
-    # sometime after homing_end_idx was the peak force elbow and the start of
-    # the dwell line
-    post_contact_time = time[contact_elbow_idx:pullback_start_idx]
-    post_contact_force = force[contact_elbow_idx:pullback_start_idx]
-    logging.info("Key Points:"
-                 "contact_elbow_idx:%s, homing_end_idx:%s, pullback_start_idx:%s"
-                 % (contact_elbow_idx, homing_end_idx, pullback_start_idx,))
-    logging.info("post_contact_time.length: %s" % (len(post_contact_time)))
-    dwell_start_idx_a = contact_elbow_idx + find_two_lines_best_fit(post_contact_time, post_contact_force, 1)
-    dwell_start_idx = contact_elbow_idx + find_kneedle(post_contact_time, post_contact_force)
-    # l2 is the compression line, it may have very few points so do not discard
+    def index_near(self, instant):
+        import numpy as np
+        return int(np.argmax(np.asarray(self.time) >= instant)
+                   or len(self.time) - 1)
 
-    logging.info("Key Points:"
-                 "contact_elbow_idx:%s, homing_end_idx:%s, dwell_start_idx_a:%s, dwell_start_idx:%s, pullback_start_idx:%s"
-                 % (contact_elbow_idx, homing_end_idx, dwell_start_idx_a, dwell_start_idx, pullback_start_idx, ))
-    compression_length = dwell_start_idx - contact_elbow_idx
-    logging.info("compression line length: %s" % (compression_length,))
-    #if compression_length < 2:
-    #    raise "compression line is short!"
+    def line(self, start_idx, end_idx, discard_left=0, discard_right=0):
+        t, f = self._split(start_idx, end_idx, discard_left, discard_right)
+        mx, b = self._lstsq_line(t, f)
+        return ForceLine(mx, b)
 
-    compression_time = time[contact_elbow_idx: dwell_start_idx]
-    compression_force = force[contact_elbow_idx: dwell_start_idx]
-    l2 = lstsq_line(compression_time, compression_force)
-    # probe contact point
-    p1 = l1.intersection(l2)
-    # re-compute the dwell line to eliminate ringing effects
-    # discard the first 1/5th of the line because it can contain ringing
-    ringing_discard = ((pullback_start_idx - dwell_start_idx) // 5)
+    # break a tap event down into 6 points and 5 lines:
+    #    *-----*|       /*-----*
+    #           |      /
+    #           *----*/
+    def tap_decompose(self, homing_end_time, pullback_start_time,
+                      discard=0):
+        homing_end_idx = self.index_near(homing_end_time)
+        pullback_start_idx = self.index_near(pullback_start_time)
+        contact_elbow_idx = self.find_elbow(0, homing_end_idx, -1)
+        # l1 is the approach line
+        l1 = self.line(0, contact_elbow_idx, discard, discard)
+        # sometime after contact_elbow_idx is the peak force and the start of
+        # the dwell line
+        dwell_start_idx = self.find_elbow(contact_elbow_idx,
+                                           pullback_start_idx)
+        # l2 is the compression line, it may have very few points so no discard
+        l2 = self.line(contact_elbow_idx, dwell_start_idx)
+        # l3 is the dwell line
+        l3 = self.line(dwell_start_idx, pullback_start_idx, discard, discard)
+        # discard the first 1/5th of the line because it can contain ringing
+#                        ((pullback_start_idx - dwell_start_idx) // 5), discard)
+        # find the elbow where the probe breaks contact
+        break_contact_idx = self.find_elbow(pullback_start_idx, -1)
+        l4 = self.line(pullback_start_idx, break_contact_idx, discard, discard)
+        l5 = self.line(break_contact_idx, -1, discard, discard)
 
-    if ringing_discard < 0:   # 0, 278, 274
-        raise "ringing_discard is negative!!"
-    dwell_start = dwell_start_idx + ringing_discard
-    dwell_time = time[dwell_start: pullback_start_idx - discard]
-    dwell_force = force[dwell_start: pullback_start_idx - discard]
-    l3 = lstsq_line(dwell_time, dwell_force)
-
-    # pullback elbow
-    pullback_time = time[pullback_start_idx: -1]
-    pullback_force = force[pullback_start_idx: -1]
-    l4, p4, l5 = elbow_split(pullback_time, pullback_force, default_discard)
-
-    # dwell line intersections:
-    p2 = l3.intersection(l2)
-    p3 = l3.intersection(l4)
-    p0 = ForcePoint(time[0], l1.find_force(time[0]))
-    p5 = ForcePoint(time[-1], l5.find_force(time[-1]))
-    return [p0, p1, p2, p3, p4, p5], [l1, l2, l3, l4, l5]
+        # Line intersections:
+        p0 = ForcePoint(self.time[0], l1.find_force(self.time[0]))
+        p1 = l1.intersection(l2)
+        p2 = l2.intersection(l3)
+        p3 = l3.intersection(l4)
+        p4 = l4.intersection(l5)
+        p5 = ForcePoint(self.time[-1], l5.find_force(self.time[-1]))
+        return [p0, p1, p2, p3, p4, p5], [l1, l2, l3, l4, l5]
 
 # calculate variance between a ForceLine and a region of force data
 def segment_variance(force, time, start, end, line):
@@ -319,6 +285,7 @@ class TapAnalysis(object):
         np_samples = np.array(samples)
         self.time = np_samples[:, 0]
         self.force = np_samples[:, 1]
+        self.force_graph = ForceGraph(self.time, self.force)
         self.force = tap_filter.filtfilt(self.force)
         self.sample_time = np.average(np.diff(self.time))
         self.r_squared_widths = [int((n * 0.01) // self.sample_time)
@@ -397,37 +364,8 @@ class TapAnalysis(object):
         return moves_out
 
     def analyze(self):
-        discard = self.discard
-        force = self.force
-        time = self.time
-        # find peak local maximum force after homing ends:
-        #home_end_index = index_near(time, self.home_end_time)
-        #pullback_start_index = index_near(time, self.pullback_start_time)
-        # look forward for the next index where force decreases:
-        # TODO: REVIEW: On my printer it is always true that the calculated
-        # home_end_time is before peak force. Could this not be true for other
-        # printers?
-        # TODO: on the K1 this doesnt work all the time. It sensor is slow so
-        # there is no peak, only an elbow:
-        # --|             --|
-        #   | /----    vs   |  (K1)
-        #   |/              |----
-        #max_force = abs(force[home_end_index])
-        #peak_force_index = home_end_index
-        #for i in range(home_end_index + 1, pullback_start_index):
-        #    next_force = abs(force[i])
-        #    if next_force > max_force:
-        #        max_force = next_force
-        #        peak_force_index += 1
-        #    else:
-        #        break
-        #if not self.validate_peak_force(peak_force_index, home_end_index):
-        #    logging.info('Peak force not close to endstop trigger time')
-        #    return
-        home_end_index = index_near(time, self.home_end_time)
-        pullback_start_index = index_near(time, self.pullback_start_time)
-        points, lines = tap_decompose(time, force, home_end_index,
-                            pullback_start_index, discard)
+        points, lines = self.force_graph.tap_decompose(self.home_end_time,
+                            self.pullback_start_time, self.discard)
         self.tap_points = points
         self.tap_lines = lines
         if not self.validate_order():
@@ -470,8 +408,8 @@ class TapAnalysis(object):
     # check for space around elbows to calculate r_squared
     def validate_elbow_clearance(self):
         width = self.r_squared_widths[-1]
-        start_idx = index_near(self.time, self.tap_points[1].time) + width
-        end_idx = index_near(self.time, self.tap_points[4].time) - width
+        start_idx = self.force_graph.index_near(self.tap_points[1].time) + width
+        end_idx = self.force_graph.index_near(self.tap_points[4].time) - width
         return start_idx > 0 and end_idx < len(self.time)
 
     # the proposed break contact point must fall inside the pullback move
@@ -486,7 +424,7 @@ class TapAnalysis(object):
     def calculate_r_squared(self):
         r_squared = []
         for i, elbow in enumerate(self.tap_points[1: -1]):
-            elbow_idx = index_near(self.time, elbow.time)
+            elbow_idx = self.force_graph.index_near(elbow.time)
             r_squared.append(elbow_r_squared(self.force, self.time, elbow_idx,
                             self.r_squared_widths,
                             self.tap_lines[i], self.tap_lines[i + 1]))
