@@ -152,7 +152,12 @@ class LoadCellCommandHelper:
         reactor = self.printer.get_reactor()
         collector.start_collecting()
         reactor.pause(reactor.monotonic() + 10.)
-        samples = collector.stop_collecting()
+        samples, errors = collector.stop_collecting()
+        if errors:
+            gcmd.respond_info("Sensor reported errors: %i errors,"
+                              " %i overflows" % (errors[0], errors[1]))
+        else:
+            gcmd.respond_info("Sensor reported no errors")
         if not samples:
             raise gcmd.error("No samples returned from sensor!")
         counts = np.asarray(samples)[:, 2].astype(int)
@@ -314,10 +319,14 @@ class LoadCellSampleCollector:
         self.min_count = float("inf")  # In Python 3.5 math.inf is better
         self.is_started = False
         self._samples = []
+        self._errors = 0
+        self._overflows = 0
 
     def _on_samples(self, msg):
         if not self.is_started:
             return False  # already stopped, ignore
+        self._errors += msg['errors']
+        self._overflows += msg['overflows']
         samples = msg['data']
         for sample in samples:
             time = sample[0]
@@ -336,7 +345,11 @@ class LoadCellSampleCollector:
         self.min_count = float("inf")  # In Python 3.5 math.inf is better
         samples = self._samples
         self._samples = []
-        return samples
+        errors = self._errors
+        self._errors = 0
+        overflows = self._overflows
+        self._overflows = 0
+        return samples, (errors, overflows) if errors or overflows else 0
 
     def _collect_until(self, timeout):
         self.start_collecting()
@@ -344,7 +357,8 @@ class LoadCellSampleCollector:
             now = self._reactor.monotonic()
             if self._mcu.estimated_print_time(now) > timeout:
                 raise self._printer.command_error(
-                    "LoadCellSampleCollector timed out")
+                    "LoadCellSampleCollector timed out! Errors: %i,"
+                    " Overflows: %i" % (self._errors, self._overflows))
             self._reactor.pause(now + RETRY_DELAY)
         return self._finish_collecting()
 
@@ -361,6 +375,7 @@ class LoadCellSampleCollector:
         return self._finish_collecting()
 
     # block execution until at least min_count samples are collected
+    # will return all samples collected, not just up to min_count
     def collect_min(self, min_count=1):
         self.min_count = min_count
         if len(self._samples) >= min_count:
@@ -370,10 +385,10 @@ class LoadCellSampleCollector:
         sps = self._load_cell.sensor.get_samples_per_second()
         return self._collect_until(start_time + 1. + (min_count / sps))
 
-    # block execution until a sample is returned with a timestamp after max_time
-    def collect_until(self, max_time=None):
-        self.max_time = max_time
-        if len(self._samples) and self._samples[-1][0] >= max_time:
+    # returns when a sample is collected with a timestamp after print_time
+    def collect_until(self, print_time=None):
+        self.max_time = print_time
+        if len(self._samples) and self._samples[-1][0] >= print_time:
             return self._finish_collecting()
         return self._collect_until(self.max_time + 1.)
 
@@ -417,6 +432,8 @@ class LoadCell:
     # convert raw counts to grams and broadcast to clients
     def _sensor_data_event(self, msg):
         data = msg.get("data")
+        errors = msg.get("errors")
+        overflows = msg.get("overflows")
         if data is None:
             return None
         samples = []
@@ -424,7 +441,7 @@ class LoadCell:
             # [time, grams, counts, tare_counts]
             samples.append([row[0], self.counts_to_grams(row[1]), row[1],
                             self.tare_counts])
-        return {'data': samples}
+        return {'data': samples, 'errors': errors, 'overflows': overflows }
 
     # get internal events of force data
     def add_client(self, callback):
@@ -469,7 +486,11 @@ class LoadCell:
         import numpy as np
         if num_samples is None:
             num_samples = self.sensor.get_samples_per_second()
-        samples = self.get_collector().collect_min(num_samples)
+        samples, errors = self.get_collector().collect_min(num_samples)
+        if errors:
+            raise self.printer.command_error(
+                "Sensor reported %i errors while sampling"
+                    % (errors[0] + errors[1]))
         # check samples for saturated readings
         range_min, range_max = self.saturation_range()
         for sample in samples:
