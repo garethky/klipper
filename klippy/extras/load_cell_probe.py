@@ -990,6 +990,21 @@ class LoadCellEndstop:
         else:
             return params['is_triggered'] == 1
 
+    def _raise_probe(self):
+        toolhead = self.printer.lookup_object('toolhead')
+        start_pos = toolhead.get_position()
+        self.deactivate_gcode.run_gcode_from_command()
+        if toolhead.get_position()[:3] != start_pos[:3]:
+            raise self.printer.command_error(
+                "Toolhead moved during probe deactivate_gcode script")
+    def _lower_probe(self):
+        toolhead = self.printer.lookup_object('toolhead')
+        start_pos = toolhead.get_position()
+        self.activate_gcode.run_gcode_from_command()
+        if toolhead.get_position()[:3] != start_pos[:3]:
+            raise self.printer.command_error(
+                "Toolhead moved during probe activate_gcode script")
+
     # Interface for ProbeEndstopWrapper
     def probing_move(self, pos, speed):
         raise self.printer.command_error("Not Implemented")
@@ -998,16 +1013,21 @@ class LoadCellEndstop:
         return self._helper.tapping_move(self, pos, speed)
 
     def multi_probe_begin(self):
-        pass
+        self.multi = 'FIRST'
 
     def multi_probe_end(self):
-        pass
+        self._raise_probe()
+        self.multi = 'OFF'
 
     def probe_prepare(self, hmove):
-        pass
+        if self.multi == 'OFF' or self.multi == 'FIRST':
+            self._lower_probe()
+            if self.multi == 'FIRST':
+                self.multi = 'ON'
 
     def probe_finish(self, hmove):
-        pass
+        if self.multi == 'OFF':
+            self._raise_probe()
 
     def get_position_endstop(self):
         return self.position_endstop
