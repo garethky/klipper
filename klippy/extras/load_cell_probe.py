@@ -608,9 +608,10 @@ class LoadCellProbeSessionHelper:
             epos, is_good = self.single_tap(params['probe_speed'])
             if is_good:
                 return epos
-            elif retries < self.bad_tap_retries:
+            if retries < self.bad_tap_retries:
                 self.retract(probexy, epos, params)
                 self.clean_nozzle(retries)
+                retries += 1
                 # TODO: maybe goto the probing location after cleaning?
             else:
                 raise self.printer.command_error(
