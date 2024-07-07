@@ -441,6 +441,8 @@ class LoadCell:
             # [time, grams, counts, tare_counts]
             samples.append([row[0], self.counts_to_grams(row[1]), row[1],
                             self.tare_counts])
+        if errors or overflows:
+            logging.info("saw errors in sensor data, passing those along: errors: %s, overflows: %s" % (errors, overflows))
         return {'data': samples, 'errors': errors, 'overflows': overflows }
 
     # get internal events of force data

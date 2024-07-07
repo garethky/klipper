@@ -975,6 +975,7 @@ class LoadCellEndstop:
         self._dispatch.wait_end(home_end_time)
         # trigger has happened, now to find out why...
         res = self._dispatch.stop()
+        logging.info("TrSync triggered: %s" % (res,))
         if res >= mcu.MCU_trsync.REASON_COMMS_TIMEOUT:
             if res == mcu.MCU_trsync.REASON_COMMS_TIMEOUT:
                 raise self.printer.command_error(

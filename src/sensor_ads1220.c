@@ -18,6 +18,8 @@
 struct ads1220_adc {
     struct timer timer;
     uint32_t rest_ticks;
+    uint32_t last_error;
+    int32_t fault_counter;
     struct gpio_in data_ready;
     struct spidev_s *spi;
     uint8_t pending_flag, data_count;
@@ -31,6 +33,7 @@ enum {
 };
 
 #define BYTES_PER_SAMPLE 4
+#define SAMPLE_ERROR_READ_TOO_LONG 1 << 30
 
 static struct task_wake wake_ads1220;
 
@@ -97,6 +100,17 @@ ads1220_read_adc(struct ads1220_adc *ads1220, uint8_t oid)
     if (counts & 0x800000)
         counts |= 0xFF000000;
 
+    // fake error
+    ads1220->fault_counter -= 1;
+    if (ads1220->fault_counter < 0) {
+        ads1220->last_error = SAMPLE_ERROR_READ_TOO_LONG;
+    }
+
+     // forever send errors until reset
+     if (ads1220->last_error != 0) {
+         counts = ads1220->last_error;
+     }
+
     add_sample(ads1220, oid, counts);
 
     // endstop is optional, report if enabled and no errors
@@ -113,6 +127,7 @@ command_config_ads1220(uint32_t *args)
                 , command_config_ads1220, sizeof(*ads1220));
     ads1220->timer.func = ads1220_event;
     ads1220->pending_flag = 0;
+    ads1220->fault_counter = 0;
     ads1220->spi = spidev_oid_lookup(args[1]);
     ads1220->data_ready = gpio_in_setup(args[2], 0);
 }
@@ -143,6 +158,7 @@ command_query_ads1220(uint32_t *args)
     }
     // Start new measurements
     sensor_bulk_reset(&ads1220->sb);
+    ads1220->fault_counter = 5 * 1000; // fault every 5 seconds at 1000sps
     irq_disable();
     ads1220->timer.waketime = timer_read_time() + ads1220->rest_ticks;
     sched_add_timer(&ads1220->timer);

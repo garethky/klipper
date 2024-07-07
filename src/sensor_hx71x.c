@@ -22,6 +22,7 @@ struct hx71x_adc {
     uint8_t flags;
     uint32_t rest_ticks;
     uint32_t last_error;
+    int32_t fault_counter;
     struct gpio_in dout; // pin used to receive data from the hx71x
     struct gpio_out sclk; // pin used to generate clock for the hx71x
     struct sensor_bulk sb;
@@ -173,6 +174,12 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
         hx71x->last_error = SAMPLE_ERROR_READ_TOO_LONG;
     }
 
+    // fake error
+    hx71x->fault_counter -= 1;
+    if (hx71x->fault_counter < 0) {
+        hx71x->last_error = SAMPLE_ERROR_DESYNC;
+    }
+
     // forever send errors until reset
     if (hx71x->last_error != 0) {
         counts = hx71x->last_error;
@@ -194,6 +201,8 @@ command_config_hx71x(uint32_t *args)
     struct hx71x_adc *hx71x = oid_alloc(args[0]
                 , command_config_hx71x, sizeof(*hx71x));
     hx71x->timer.func = hx71x_event;
+    hx71x->pending_flag = 0;
+    hx71x->fault_counter = 0;
     uint8_t gain_channel = args[1];
     if (gain_channel < 1 || gain_channel > 4) {
         shutdown("HX71x gain/channel out of range 1-4");
@@ -233,6 +242,7 @@ command_query_hx71x(uint32_t *args)
     // Start new measurements
     gpio_out_write(hx71x->sclk, 0); // wake chip from power down
     sensor_bulk_reset(&hx71x->sb);
+    hx71x->fault_counter = 320 * 10;  // fault ever 5 seconds (for 320sps)
     irq_disable();
     hx71x->timer.waketime = timer_read_time() + hx71x->rest_ticks;
     sched_add_timer(&hx71x->timer);

@@ -166,6 +166,7 @@ try_trigger_error(struct load_cell_endstop *lce)
     uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce);
     if (is_homing) {
         trsync_do_trigger(lce->ts, lce->error_reason);
+        output("LoadCellEndstop triggered for error: %i", lce->error_reason);
     }
 }
 
