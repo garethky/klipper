@@ -718,8 +718,12 @@ class ProbeSessionContext():
         epos = phoming.probing_move(mcu_probe, pos, speed)
         pullback_end_time = self.pullback_move()
         pullback_end_pos = toolhead.get_position()
-        samples = self.collector.collect_until(pullback_end_time
+        samples, errors = self.collector.collect_until(pullback_end_time
                                                + self.pullback_extra_time)
+        if errors:
+            raise self.printer.command_error(
+                "Sensor reported errors while homing: %i errors, %i overflows"
+                % (errors[0], errors[1]))
         self.collector = None
         ppa = TapAnalysis(self.printer, samples, self.tap_filter)
         ppa.analyze()
@@ -911,8 +915,12 @@ class LoadCellEndstop:
         toolhead = self.printer.lookup_object('toolhead')
         collector = self._load_cell.get_collector()
         # collect tare_samples AFTER current move ends
-        collector.collect_until(toolhead.get_last_move_time())
-        tare_samples = collector.collect_min(self.tare_samples)
+        collector.start_collecting(min_time=toolhead.get_last_move_time())
+        tare_samples, errors = collector.collect_min(self.tare_samples)
+        if errors:
+            raise self.printer.command_error(
+            "Sensor reported errors while homing: %i errors, %i overflows"
+                              % (errors[0], errors[1]))
         tare_counts = np.average(np.array(tare_samples)[:, 2].astype(float))
         self.set_endstop_range(int(tare_counts))
 
