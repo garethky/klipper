@@ -285,9 +285,9 @@ class TapAnalysis(object):
         np_samples = np.array(samples)
         self.time = np_samples[:, 0]
         self.force = np_samples[:, 1]
-        self.force_graph = ForceGraph(self.time, self.force)
-        self.force = tap_filter.filtfilt(self.force)
         self.sample_time = np.average(np.diff(self.time))
+        self.force = tap_filter.filtfilt(self.force)
+        self.force_graph = ForceGraph(self.time, self.force)
         self.r_squared_widths = [int((n * 0.01) // self.sample_time)
                                  for n in range(2, 7)]
         trapq = printer.lookup_object('motion_report').trapqs['toolhead']
