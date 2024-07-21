@@ -197,7 +197,7 @@ class ADS1220():
             raise self.printer.command_error(
                 "Invalid ads1220 reset state (got %s vs %s).\n"
                 "This is generally indicative of connection problems\n"
-                "(e.g. faulty wiring) or a faulty adxl345 chip."
+                "(e.g. faulty wiring) or a faulty ADS1220 chip."
                 % (hexify(val), hexify(RESET_STATE)))
 
     def setup_chip(self):
