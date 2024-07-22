@@ -960,7 +960,7 @@ class LoadCellEndstop:
         rest_ticks = self._mcu.seconds_to_clock(self._rest_time)
         self._home_cmd.send([self._oid, self._dispatch.get_oid(),
             mcu.MCU_trsync.REASON_ENDSTOP_HIT, self.REASON_SENSOR_ERROR, clock,
-            self.trigger_count, rest_ticks, WATCHDOG_MAX], reqclock=clock)
+            self.trigger_count, rest_ticks, WATCHDOG_MAX])
         return trigger_completion
 
     def clear_home(self):
