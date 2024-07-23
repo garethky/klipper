@@ -31,22 +31,64 @@ class ADS1220():
         self.last_error_count = 0
         self.consecutive_fails = 0
         # Chip options
+        self.regs = []
+        # Configuration Register 0
+        adc_MUX = config.getint('adc_MUX', 0x00, minval=0x00, maxval=0x0F)
         # Gain
-        self.gain_options = {'1': 0x0, '2': 0x1, '4': 0x2, '8': 0x3, '16': 0x4,
+        gain_options = {'1': 0x0, '2': 0x1, '4': 0x2, '8': 0x3, '16': 0x4,
                              '32': 0x5, '64': 0x6, '128': 0x7}
-        self.gain = config.getchoice('gain', self.gain_options, default='128')
+        adc_GAIN = config.getchoice('gain', gain_options, default='128')
+        adc_PGA_BYPASS = config.getint('adc_PGA_BYPASS', 0x00, minval=0x00, maxval=0x01)
+        reg_00_value = (adc_MUX << 4) | (adc_GAIN << 1) | adc_PGA_BYPASS
+        self.regs.append(reg_00_value)
+        # Configuration Register 1
         # Sample rate
         self.sps_normal = {'20': 20, '45': 45, '90': 90, '175': 175,
                            '330': 330, '600': 600, '1000': 1000}
+        self.sps_duty = {'5': 5, '11.25': 11.25, '22.5': 22.5, '44': 44,
+                         '82.5': 82.5, '150': 150, '250': 250}
         self.sps_turbo = {'40': 40, '90': 90, '180': 180, '350': 350,
                           '660': 660, '1200': 1200, '2000': 2000}
         self.sps_options = self.sps_normal.copy()
+        self.sps_options.update(self.sps_duty)
         self.sps_options.update(self.sps_turbo)
         self.sps = config.getchoice('sps', self.sps_options, default='660')
-        self.is_turbo = str(self.sps) in self.sps_turbo
+        if str(self.sps) in self.sps_turbo:
+            adc_MODE_default = 0x02 # Turbo mode (512-kHz modulator clock)
+            sps_list = self.sps_turbo
+        elif str(self.sps) in self.sps_duty:
+            adc_MODE_default = 0x01 # Duty-cycle mode (internal duty cycle of 1:4)
+            sps_list = self.sps_duty
+        elif str(self.sps) in self.sps_normal:
+            adc_MODE_default = 0x00 # Normal mode (256-kHz modulator clock, default)
+            sps_list = self.sps_normal
+        else:
+            raise config.error("ADS1220 config error: This SPS configuration"
+                               " is not supported")
+        adc_DR_default = list(sps_list.keys()).index(str(self.sps))
+        adc_DR = config.getint('adc_DR', adc_DR_default, minval=0x00, maxval=0x07)
+        adc_MODE = config.getint('adc_MODE', adc_MODE_default, minval=0x00, maxval=0x03)
+        # 0x01 is Continuous conversion mode
+        adc_CM = config.getint('adc_CM', 0x01, minval=0x00, maxval=0x01)
+        adc_TS = config.getint('adc_TS', 0x00, minval=0x00, maxval=0x01)
+        adc_BCS = config.getint('adc_BCS', 0x00, minval=0x00, maxval=0x01)
+        reg_01_value = (adc_DR << 5) | (adc_MODE << 3) | (adc_CM << 2) | (adc_TS << 1) | adc_BCS
+        self.regs.append(reg_01_value)
+        # Configuration Register 2
+        adc_VREF = config.getint('adc_VREF', 0x00, minval=0x00, maxval=0x03)
+        adc_5060 = config.getint('adc_5060', 0x00, minval=0x00, maxval=0x03)
+        adc_PSW = config.getint('adc_PSW', 0x00, minval=0x00, maxval=0x01)
+        adc_IDAC = config.getint('adc_IDAC', 0x00, minval=0x00, maxval=0x07)
+        reg_02_value = (adc_VREF << 6) | (adc_5060 << 4) | (adc_PSW << 3) | adc_IDAC
+        self.regs.append(reg_02_value)
+        # Configuration Register 3
+        adc_I1MUX = config.getint('adc_I1MUX', 0x00, minval=0x00, maxval=0x07)
+        adc_I2MUX = config.getint('adc_I2MUX', 0x00, minval=0x00, maxval=0x07)
+        adc_DRDYM = config.getint('adc_DRDYM', 0x00, minval=0x00, maxval=0x01)
+        reg_03_value = (adc_I1MUX << 5) | (adc_I2MUX << 2) | (adc_DRDYM << 1)
+        self.regs.append(reg_03_value)
         # SPI Setup
-        spi_speed = 512000 if self.is_turbo else 256000
-        self.spi = bus.MCU_SPI_from_config(config, 1, default_speed=spi_speed)
+        self.spi = bus.MCU_SPI_from_config(config, 1)
         self.mcu = mcu = self.spi.get_mcu()
         self.oid = mcu.create_oid()
         # Data Ready (DRDY) Pin
@@ -151,7 +193,7 @@ class ADS1220():
         self.send_command(RESET_CMD)
         # read startup register state and validate
         val = self.read_reg(0x0, 4)
-        if val != RESET_STATE:
+        if hexify(val) != hexify(RESET_STATE):
             raise self.printer.command_error(
                 "Invalid ads1220 reset state (got %s vs %s).\n"
                 "This is generally indicative of connection problems\n"
@@ -159,13 +201,9 @@ class ADS1220():
                 % (hexify(val), hexify(RESET_STATE)))
 
     def setup_chip(self):
-        continuous = 0x1  # enable continuous conversions
-        mode = 0x2 if self.is_turbo else 0x0  # turbo mode
-        sps_list = self.sps_turbo if self.is_turbo else self.sps_normal
-        data_rate = list(sps_list.keys()).index(str(self.sps))
-        reg_values = [(self.gain << 1),
-                      (data_rate << 5) | (mode << 3) | (continuous << 2)]
-        self.write_reg(0x0, reg_values)
+        for i, reg in enumerate(self.regs):
+            if reg > 0x00:
+                self.write_reg(i, [reg])
         # start measurements immediately
         self.send_command(START_SYNC_CMD)
 
@@ -183,7 +221,7 @@ class ADS1220():
         write_command.extend(register_bytes)
         self.spi.spi_send(write_command)
         stored_val = self.read_reg(reg, len(register_bytes))
-        if register_bytes != stored_val:
+        if hexify(register_bytes) != hexify(stored_val):
             raise self.printer.command_error(
                 "Failed to set ADS1220 register [0x%x] to %s: got %s. "
                 "This may be a connection problem (e.g. faulty wiring)" % (

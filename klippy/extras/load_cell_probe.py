@@ -134,7 +134,7 @@ class DigialFilter:
         return sos_fixed
 
     # apply the forwards+backwards "filter-filter" algorithm to data
-    def filtfilt(self, data):
+    def filtfilt(self, data, dt):
         if not self.has_filters():
             return data
         import scipy.signal as signal
@@ -143,6 +143,27 @@ class DigialFilter:
     # true if the filter is configured with any filter sections
     def has_filters(self):
         return self.filter_sections is not None
+
+# Digital filter based on FFT designer and container
+class DigialFilterFFT:
+    import numpy as np
+    def __init__(self, freqs, band):
+        self.freqs = freqs
+        self.half_band = band/2
+    # generate new filter window
+    def _get_filter(self, length, dt):
+        fftfreq = self.np.fft.rfftfreq(length, d=dt)
+        ffilter = self.np.ones(fftfreq.size)
+        for f in self.freqs:
+            ffilter[abs(abs(fftfreq) - f) < self.half_band] = 0
+        return ffilter
+    # apply the algorithm to data
+    def filtfilt(self, data, dt):
+        fft = self.np.fft.rfft(data)
+        ffilter = self._get_filter(len(data), dt)
+        filtered = self.np.multiply(fft, ffilter)
+        ifft = self.np.fft.irfft(filtered, n=len(data))
+        return ifft
 
 #########################
 # Math Support Functions
@@ -284,9 +305,10 @@ class TapAnalysis(object):
         self.discard = discard
         np_samples = np.array(samples)
         self.time = np_samples[:, 0]
-        self.force = tap_filter.filtfilt(np_samples[:, 1])
-        self.force_graph = ForceGraph(self.time, self.force)
+        self.force = np_samples[:, 1]
         self.sample_time = np.average(np.diff(self.time))
+        self.force = tap_filter.filtfilt(self.force, self.sample_time)
+        self.force_graph = ForceGraph(self.time, self.force)
         self.r_squared_widths = [int((n * 0.01) // self.sample_time)
                                  for n in range(2, 7)]
         trapq = printer.lookup_object('motion_report').trapqs['toolhead']
@@ -680,8 +702,14 @@ class ProbeSessionContext():
                                    below=math.floor(sps / 2.), max_len=5)
         notch_quality = config.getfloat("tap_filter_notch_quality",
                                         minval=0.5, maxval=3.0, default=2.0)
-        self.tap_filter = DigialFilter(sps, config.error, notches=tap_notches,
-                                       notch_quality=notch_quality)
+        tap_filter_fft_freqs = config.getfloatlist("tap_filter_fft_freqs", default=[])
+        tap_filter_fft_band = config.getfloat("tap_filter_fft_band", default=15)
+        if tap_filter_fft_freqs:
+            self.tap_filter = DigialFilterFFT(tap_filter_fft_freqs, tap_filter_fft_band)
+        else:
+            self.tap_filter = DigialFilter(sps, config.error, notches=tap_notches,
+                                           notch_quality=notch_quality)
+
         # webhooks support
         self.wh_helper = load_cell.WebhooksHelper(printer)
         name = config.get_name()
