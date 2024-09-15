@@ -4659,6 +4659,12 @@ scale.
 [load_cell]
 sensor_type:
 #   This must be one of the supported sensor types, see below.
+#counts_per_gram:
+#   The number of sensor counts that indicates 1 gram of force. This is
+#   calculated by the CALIBRATE_LOAD_CELL command.
+#reference_tare_counts:
+#   This is the tare value, in raw sensor counts, taken when CALIBRATE_LOAD_CELL
+#   is run. This is the default tare value when klipper starts up.
 ```
 
 #### XH711
