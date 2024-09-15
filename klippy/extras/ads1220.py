@@ -212,6 +212,7 @@ class ADS1220:
         write_command.extend(register_bytes)
         self.spi.spi_send(write_command)
         stored_val = self.read_reg(reg, len(register_bytes))
+        logging.info("[0x%x] to %s: got %s" % (reg, hexify(register_bytes), hexify(stored_val)))
         if bytearray(register_bytes) != stored_val:
             raise self.printer.command_error(
                 "Failed to set ADS1220 register [0x%x] to %s: got %s. "
