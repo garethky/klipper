@@ -120,3 +120,74 @@ a macro:
 ```
 {% set tare_counts = printer.load_cell.tare_counts %}
 ```
+
+
+## Viewing Live Load Cell Graphs
+
+You can see a live view of the load cell and get plots of load cell probe taps
+using a web tool available here:
+
+[Klipper Load Cell Debugging Tool](https://observablehq.com/@garethky/klipper-load-cell-debugging-tool)
+
+The page loads from the secure [observablehq.com](http://observablehq.com)
+domain. It doesn't send anything back to observablehq.com and communicates with
+the moonraker websocket over your local network. You will need to set up HTTPS
+in moonraker to get the websocket connection working. Here's how:
+
+#### 1. Add CORS domains in `moonraker.config`
+
+```
+[authorization]
+cors_domains:
+  *.static.observableusercontent.com
+  *.observablehq.com
+```
+
+#### 2. Set up HTTPS
+
+Follow these steps:
+
+##### 2.1 Enable the secure port in `moonraker.config`
+```
+[server]
+  ssl_port: 7130
+```
+
+##### 2.2 Use OpenSSL to generate a self signed cert for Moonraker:
+
+This assumes you set up Moonraker in the default location in `/home/pi/`:
+
+```
+cd ~/printer_data/certs
+sudo openssl req -new -x509 -days 365 -nodes -out moonraker.cert -keyout moonraker.key
+chmod +r ./*
+```
+
+This creates a cert in the directory where Moonraker looks for certificates. The
+certificate will last for a year. Then its adds the read permission (`+r`) to
+the cert so Moonraker can open it.
+
+#### 3. Restart Moonraker
+You can usually do this via your front end of choice. Or run:
+
+```
+sudo service moonraker restart
+```
+
+#### 4. Accept the self signed cert in your browser
+Visit your printers web interface over HTTPS (i.e.
+https://yourprinter.local:7130/) to load a page with the cert. You will get
+a warning about the cert, after you accept the warning you will be able to
+connect to the web socket.
+
+### Configuring the Page
+
+There are 2 boxes on the page:
+- `Moonraker hostname`: enter the hostname of your printer without the
+`https://` or `:7130`.
+e.g. `voron24.local`
+- `[load_cell]`, `[load_cell name], [load_cell_probe]`: Enter the name of the
+config section that you want to monitor just as it appears in your config.
+
+You might need to reload the page after entering these values to get the
+connection to work.
