@@ -165,6 +165,14 @@ Here is a suggested sequence:
 1. Heat soak the print bed
 1. Perform probing tasks: QGL, bed mesh etc.
 
+#### Nozzle Cleaner GCode
+[load_cell_probe] support a `nozzle_cleaner_gcode` option. This is run when
+an invalid tap is detected during a probe. These bad taps are usually due to
+ooze on the nozzle. klipper can only detect ooze in some situations so the
+recommendation is to limit the probing temperature so that the nozzle does not
+ooze. In the future this may change as more advanced "Bad Tap Detection" is
+researched and implemented.
+
 ### Temperature Compensation for Nozzle Growth
 
 If you are probing at a safe temperature, the nozzle will expand after
