@@ -4,6 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, math
+
 import mcu
 from . import probe, load_cell, hx71x, ads1220
 
@@ -176,31 +177,55 @@ class ForceGraph:
         residuals = np.linalg.lstsq(x_stacked, y, rcond=None)[1]
         return residuals[0] if residuals else 0
 
+    # Kneedle algorithm, finds absolute max elbow point
+    def _find_kneedle(self, time, force):
+        import numpy as np
+        # construct a line between the first and last points
+        x_coords = [time[0], time[-1]]
+        y_coords = [force[0], force[-1]]
+        mx, b = self._lstsq_line(x_coords, y_coords)
+        line = ForceLine(mx, b)
+        # now compute the Y of the line value for every x
+        fit_y = []
+        for t in time:
+            fit_y.append(line.find_force(t))
+        fit_y = np.asarray(fit_y)
+        delta_y = np.absolute(fit_y - force)
+        return np.argmax(delta_y)
+
+    def _two_lines_error(self, time, force, i):
+        r1 = self._lstsq_error(time[0:i], force[0:i])
+        r2 = self._lstsq_error(time[i:], force[i:])
+        return r1 + r2
+
     # Local best fit elbow finder, finds first point of decreasing fitness
-    def _two_lines_best_fit(self, x, y, search_direction):
-        sweep = range(2, len(x) - 2)
-        if search_direction == -1:
-            sweep = reversed(sweep)
-        min_error = float('inf')
-        for i in sweep:
-            r1 = self._lstsq_error(x[0:i], y[0:i])
-            r2 = self._lstsq_error(x[i:], y[i:])
-            error = r1 + r2
-            if error < min_error:
-                min_error = error
+    def _two_lines_gradient_descent(self, time, force, start_index):
+        best_fit_index = start_index
+        best_error = self._two_lines_error(time, force, start_index)
+        # todo: bounds checking!
+        next_error = self._two_lines_error(time, force, start_index + 1)
+        direction = 1 if best_error > next_error else -1
+        i = start_index
+        while(True):  # todo: bounds checking
+            i += direction
+            error = self. _two_lines_error(time, force, i)
+            if error < best_error:
+                best_error = error
+                best_fit_index = i
             else:
-                return i
-        raise "no elbow found!"
+                break
+        return best_fit_index
 
     def _split(self, start_idx, end_idx, discard_left=0, discard_right=0):
         t = self.time[start_idx + discard_left:end_idx - discard_right]
         f = self.force[start_idx + discard_left:end_idx - discard_right]
         return t, f
 
-    def find_elbow(self, start_idx, end_idx, search_direction=1):
+    def find_elbow(self, start_idx, end_idx):
         t, f = self._split(start_idx, end_idx)
-        elbow = self._two_lines_best_fit(t, f, search_direction)
-        return start_idx + elbow
+        kneedle_index = self._find_kneedle(t, f)
+        elbow_index = self._two_lines_gradient_descent(t, f, kneedle_index)
+        return start_idx + elbow_index
 
     def index_near(self, instant):
         import numpy as np
@@ -220,7 +245,7 @@ class ForceGraph:
                       discard=0):
         homing_end_idx = self.index_near(homing_end_time)
         pullback_start_idx = self.index_near(pullback_start_time)
-        contact_elbow_idx = self.find_elbow(0, homing_end_idx, -1)
+        contact_elbow_idx = self.find_elbow(0, homing_end_idx)
         # l1 is the approach line
         l1 = self.line(0, contact_elbow_idx, discard, discard)
         # sometime after contact_elbow_idx is the peak force and the start of
@@ -231,8 +256,6 @@ class ForceGraph:
         l2 = self.line(contact_elbow_idx, dwell_start_idx)
         # l3 is the dwell line
         l3 = self.line(dwell_start_idx, pullback_start_idx, discard, discard)
-        # discard the first 1/5th of the line because it can contain ringing
-#                        ((pullback_start_idx - dwell_start_idx) // 5), discard)
         # find the elbow where the probe breaks contact
         break_contact_idx = self.find_elbow(pullback_start_idx, -1)
         l4 = self.line(pullback_start_idx, break_contact_idx, discard, discard)
