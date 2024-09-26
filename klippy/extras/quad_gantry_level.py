@@ -45,6 +45,10 @@ class QuadGantryLevel:
         self.gcode.register_command(
             'QUAD_GANTRY_LEVEL', self.cmd_QUAD_GANTRY_LEVEL,
             desc=self.cmd_QUAD_GANTRY_LEVEL_help)
+        self.last_result = {
+            'error': None,
+            'z_heights': None
+        }
     cmd_QUAD_GANTRY_LEVEL_help = (
         "Conform a moving, twistable gantry to the shape of a stationary bed")
     def cmd_QUAD_GANTRY_LEVEL(self, gcmd):
@@ -93,7 +97,6 @@ class QuadGantryLevel:
         ainfo = zip(["z","z1","z2","z3"], z_height[0:4])
         apos = " ".join(["%s: %06f" % (x) for x in ainfo])
         self.gcode.respond_info("Actuator Positions:\n" + apos)
-
         z_ave = sum(z_height) / len(z_height)
         self.gcode.respond_info("Average: %0.6f" % z_ave)
         z_adjust = []
@@ -109,6 +112,12 @@ class QuadGantryLevel:
 
         speed = self.probe_helper.get_lift_speed()
         self.z_helper.adjust_steppers(z_adjust, speed)
+
+        error = round(max(z_positions) - min(z_positions), 6)
+        self.last_result = {
+            'error': error,
+            'z_heights': z_height
+        }
         return self.z_status.check_retry_result(
             self.retry_helper.check_retry(z_positions))
 
@@ -122,7 +131,9 @@ class QuadGantryLevel:
     def plot(self,f,x):
         return f[0]*x + f[1]
     def get_status(self, eventtime):
-        return self.z_status.get_status(eventtime)
+        status = self.z_status.get_status(eventtime)
+        status.update(self.last_result)
+        return status
 
 def load_config(config):
     return QuadGantryLevel(config)

@@ -387,6 +387,8 @@ The following information is available in the `quad_gantry_level` object
 (this object is available if quad_gantry_level is defined):
 - `applied`: True if the gantry leveling process has been run and completed
   successfully.
+- `z_heights`: An array of the four z height values that were measured
+- `error`: The error in z height which was checked again `retry_tolerance`
 
 ## query_endstops
 

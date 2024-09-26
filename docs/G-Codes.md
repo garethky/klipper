@@ -1416,6 +1416,21 @@ adjustments to each Z stepper to compensate for tilt. See the PROBE command for
 details on the optional probe parameters. The optional `HORIZONTAL_MOVE_Z`
 value overrides the `horizontal_move_z` option specified in the config file.
 
+### [quad_gantry_level]
+The following commands are available when the
+[quad_gantry_level config section](Config_Reference.md#quad_gantry_level)
+is enabled.
+
+#### QUAD_GANTRY_LEVEL
+`QUAD_GANTRY_LEVEL [HORIZONTAL_MOVE_Z=<value>] [RETRY_TOLERANCE=<value>]
+ RETRIES=<value>`:
+- `HORIZONTAL_MOVE_Z` - A floating point value in mm that overrides the 
+`horizontal_move_z` option specified in the config file.
+- `RETRY_TOLERANCE` - A floating point value between 0 and 1 that overrides the
+`retry_tolerance` value in the config.
+- `RETRIES` - The maximum number of retries to perform, overrides the `retries`
+value in the config
+
 ### [temperature_probe]
 
 The following commands are available when a
