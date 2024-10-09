@@ -17,7 +17,7 @@ START_SYNC_CMD = 0x08
 RREG_CMD = 0x20
 WREG_CMD = 0x40
 NOOP_CMD = 0x0
-RESET_STATE = bytearray([0x0, 0x0, 0x0, 0x0])
+RESET_STATE = bytes([0x0, 0x0, 0x0, 0x0])
 
 # turn bytearrays into pretty hex strings: [0xff, 0x1]
 def hexify(byte_array):
@@ -163,8 +163,10 @@ class ADS1220:
         mode = 0x2 if self.is_turbo else 0x0  # turbo mode
         sps_list = self.sps_turbo if self.is_turbo else self.sps_normal
         data_rate = list(sps_list.keys()).index(str(self.sps))
-        reg_values = [(self.gain << 1),
-                      (data_rate << 5) | (mode << 3) | (continuous << 2)]
+        reg_values = bytes([
+            (self.gain << 1),
+            (data_rate << 5) | (mode << 3) | (continuous << 2)
+        ])
         self.write_reg(0x0, reg_values)
         # start measurements immediately
         self.send_command(START_SYNC_CMD)
@@ -173,7 +175,7 @@ class ADS1220:
         read_command = [RREG_CMD | (reg << 2) | (byte_count - 1)]
         read_command += [NOOP_CMD] * byte_count
         params = self.spi.spi_transfer(read_command)
-        return bytearray(params['response'][1:])
+        return bytes(params['response'][1:])
 
     def send_command(self, cmd):
         self.spi.spi_send([cmd])
