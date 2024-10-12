@@ -163,8 +163,10 @@ class ADS1220:
         mode = 0x2 if self.is_turbo else 0x0  # turbo mode
         sps_list = self.sps_turbo if self.is_turbo else self.sps_normal
         data_rate = list(sps_list.keys()).index(str(self.sps))
-        reg_values = [(self.gain << 1),
-                      (data_rate << 5) | (mode << 3) | (continuous << 2)]
+        reg_values = bytearray([
+            (self.gain << 1),
+            (data_rate << 5) | (mode << 3) | (continuous << 2)
+        ])
         self.write_reg(0x0, reg_values)
         # start measurements immediately
         self.send_command(START_SYNC_CMD)
