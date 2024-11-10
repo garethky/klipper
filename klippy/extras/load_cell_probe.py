@@ -637,7 +637,7 @@ class LoadCellProbeSessionHelper:
                 # TODO: maybe goto the probing location after cleaning?
             else:
                 raise self.printer.command_error(
-                    'Bad taps exceeded bas_tap_retries')
+                    'Bad taps exceeded bad_tap_retries')
 
     def retract(self, probexy, pos, params):
         toolhead = self.printer.lookup_object('toolhead')
