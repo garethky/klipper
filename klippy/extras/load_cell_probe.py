@@ -361,21 +361,24 @@ class TapAnalysis(object):
     def _recalculate_homing_end(self):
         #TODO: REVIEW: This takes some logical shortcuts, does it need to be
         # more generalized? e.g. to all 3 axes?
-        homing_move = self.moves[-5]
-        halt_move = self.moves[-4]
-        # acceleration should be 0! This is the 'coasting' move:
-        if homing_move.accel != 0.:
-            raise self.printer.command_error(
-                    'Unexpected acceleration in coasting move')
-        # how long did it take to get to end_z?
-        homing_move.move_t = abs((halt_move.start_z - homing_move.start_z)
-                                 / homing_move.start_v)
-        return homing_move.print_time + homing_move.move_t
+        if self.moves[-5].accel == 0:
+            homing_move = self.moves[-5]
+            halt_move = self.moves[-4]
+            homing_move.move_t = abs((halt_move.start_z - homing_move.start_z) / homing_move.start_v)
+            return homing_move.print_time + homing_move.move_t
+        elif self.moves[-4].accel == 0:
+            # There was no halt move
+            homing_move = self.moves[-4]
+            return homing_move.print_time + homing_move.move_t
+        else:
+            raise self.printer.command_error("Could not find homing move")
 
     def _extract_trapq(self, trapq):
         moves, _ = trapq.extract_trapq(self.time[0], self.time[-1])
         moves_out = []
         for move in moves:
+            if move.move_t == 0.0:
+                continue
             moves_out.append(TrapezoidalMove(move))
             # DEBUG: enable to see trapq contents
             # logging.info("trapq move: %s" % (moves_out[-1].to_dict(),))
