@@ -175,7 +175,7 @@ class ForceGraph:
         y = np.asarray(y)
         x_stacked = np.vstack([x, np.ones(len(x))]).T
         residuals = np.linalg.lstsq(x_stacked, y, rcond=None)[1]
-        return residuals[0] if residuals else 0
+        return residuals[0] if residuals.size > 0 else 0
 
     # Kneedle algorithm, finds absolute max elbow point
     def _find_kneedle(self, time, force):
