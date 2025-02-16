@@ -150,11 +150,18 @@ class ProbeCommandHelper:
         for i in range(len(positions)):
             deviation_sum += pow(positions[i][2] - avg_value, 2.)
         sigma = (deviation_sum / len(positions)) ** 0.5
+        # calculate the average delta between successive probes
+        delta_sum = 0
+        for i in range(1, len(positions)):
+            delta_sum += abs(positions[i][2] - positions[i - 1][2])
+        avg_delta = (delta_sum / (len(positions) - 1))
         # Show information
         gcmd.respond_info(
             "probe accuracy results: maximum %.6f, minimum %.6f, range %.6f, "
-            "average %.6f, median %.6f, standard deviation %.6f" % (
-            max_value, min_value, range_value, avg_value, median, sigma))
+            "average %.6f, median %.6f, standard deviation %.6f, "
+            "average delta: %.6f" % (
+            max_value, min_value, range_value, avg_value, median, sigma,
+            avg_delta))
     cmd_Z_OFFSET_APPLY_PROBE_help = "Adjust the probe's z_offset"
     def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd):
         gcode_move = self.printer.lookup_object("gcode_move")
