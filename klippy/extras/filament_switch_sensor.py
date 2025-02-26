@@ -25,9 +25,12 @@ class RunoutHelper:
                 config, 'insert_gcode')
         self.pause_delay = config.getfloat('pause_delay', .5, above=.0)
         self.event_delay = config.getfloat('event_delay', 3., above=0.)
+        self.debounce = config.getfloat('debounce', 0., above=0.)
         # Internal state
         self.min_event_systime = self.reactor.NEVER
         self.filament_present = False
+        self.switch_state = False
+        self.last_eventtime = None
         self.sensor_enabled = True
         # Register commands and event handlers
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
@@ -60,20 +63,35 @@ class RunoutHelper:
             logging.exception("Script running error")
         self.min_event_systime = self.reactor.monotonic() + self.event_delay
     def note_filament_present(self, is_filament_present):
+        # update the time of the last event
+        self.switch_state = is_filament_present
+        eventtime = self.reactor.monotonic()
+        self.last_eventtime = eventtime
+        # if the event wouldn't cause a state transition, ignore it
         if is_filament_present == self.filament_present:
             return
-        self.filament_present = is_filament_present
-        eventtime = self.reactor.monotonic()
         if eventtime < self.min_event_systime or not self.sensor_enabled:
             # do not process during the initialization time, duplicates,
             # during the event delay time, while an event is running, or
             # when the sensor is disabled
             return
+        # delay event execution by debounce time
+        trigger_time = eventtime + self.debounce
+        self.reactor.register_callback(self._debounce_handler, trigger_time)
+    def _debounce_handler(self):
+        # if there is no state transition, ignore the event:
+        if self.switch_state == self.filament_present:
+            return
+        # if there were more recent events, they supersede this one:
+        eventtime = self.reactor.monotonic()
+        if eventtime - self.debounce < self.last_eventtime:
+            return
+        self.filament_present = self.switch_state
         # Determine "printing" status
         idle_timeout = self.printer.lookup_object("idle_timeout")
         is_printing = idle_timeout.get_status(eventtime)["state"] == "Printing"
         # Perform filament action associated with status change (if any)
-        if is_filament_present:
+        if self.filament_present:
             if not is_printing and self.insert_gcode is not None:
                 # insert detected
                 self.min_event_systime = self.reactor.NEVER
