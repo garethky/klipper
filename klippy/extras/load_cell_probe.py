@@ -343,8 +343,10 @@ PULLBACK_START = -3
 PULLBACK_CRUISE = -2
 PULLBACK_END = -1
 class TapAnalysis(object):
-    def __init__(self, printer, samples, discard=DEFAULT_DISCARD_POINTS):
+    def __init__(self, printer, samples, tap_filter,
+                        discard=DEFAULT_DISCARD_POINTS):
         import numpy as np
+        import scipy.signal as singal
         self.printer = printer
         self.samples = samples
         self.discard = discard
@@ -365,7 +367,12 @@ class TapAnalysis(object):
         self.position = None
         nd_samples = np.asarray(samples, dtype=np.float64)
         self.time = nd_samples[:, 0]
-        self.force = nd_samples[:, 1]
+        import scipy.signal as signal
+        force = nd_samples[:, 1]
+        if not tap_filter is None and len(tap_filter):
+            force = signal.sosfiltfilt(tap_filter, force)
+        self.force = force
+        ### End Experiment
         self.force_graph = ForceGraph(self.time, self.force)
         trapq = printer.lookup_object('motion_report').trapqs['toolhead']
         self.moves = self._extract_trapq(trapq)
@@ -775,6 +782,8 @@ class ProbeSessionContext:
                                               default=default_pullback_speed)
         self.bad_tap_module = self.load_module(config, 'bad_tap_module',
                                                BadTapModule())
+        # optional filtering of tap data for analysis
+        self._tap_filter = self._build_tap_sos_filter(sps, config)
         # webhooks support
         self.clients = load_cell.ApiClientHelper(printer)
         name = config.get_name()
@@ -785,6 +794,34 @@ class ProbeSessionContext:
     def load_module(self, config, name, default):
         module = config.get(name, default=None)
         return default if module is None else self.printer.lookup_object(module)
+
+    def _build_tap_sos_filter(self, sps, config):
+        # optional continuous tearing
+        max_filter_frequency = math.floor(sps / 2.)
+        lowpass = config.getfloat("tap_buzz_filter_cutoff_frequency",
+                                above=min(40.0, max_filter_frequency - 1.0),
+                                below=max_filter_frequency, default=None)
+        lowpass_filter_order = config.getint("tap_buzz_filter_order",
+                                minval=1, maxval=10, default=4)
+        notches = sos_filter.getfloatlist(config,
+                                "tap_notch_filter_frequencies",
+                                max_len=6, above=0.,
+                                below=max_filter_frequency)
+        notch_quality = config.getfloat("tap_notch_filter_quality",
+                                minval=0.5, maxval=6.0, default=2.0)
+        if notches is None and lowpass is None:
+            return None
+        import scipy.signal as signal
+        import numpy as np
+        filters = []
+        if lowpass:
+            filters.append(signal.butter(lowpass_filter_order, Wn=lowpass
+                                , btype='lowpass', fs=sps, output='sos'))
+        if notches:
+            for notch in notches:
+                b, a = signal.iirnotch(notch, Q=notch_quality, fs=sps)
+                filters.append(signal.tf2sos(b, a))
+        return np.vstack(filters)
 
     # Perform the pullback move and returns the time when the move will end
     def pullback_move(self):
@@ -816,7 +853,7 @@ class ProbeSessionContext:
                 "Sensor reported errors while homing: %i errors, %i overflows"
                 % (errors[0], errors[1]))
         self.collector = None
-        ppa = TapAnalysis(self.printer, samples)
+        ppa = TapAnalysis(self.printer, samples, self._tap_filter)
         ppa.analyze()  # TODO: do this on a thread and return the lambda
         # broadcast tap event data:
         self.clients.send({'tap': ppa.to_dict()})
@@ -922,7 +959,7 @@ class LoadCellEndstop:
                                     above=(highpass or 0.),
                                     below=(lowpass or max_filter_frequency))
         notch_quality = config.getfloat("notch_filter_quality",
-                                        minval=0.5, maxval=6.0, default=2.0)
+                                    minval=0.5, maxval=6.0, default=2.0)
         return sos_filter.DigitalFilter(sps, config.error, highpass,
                              lowpass, notches, notch_quality)
 
