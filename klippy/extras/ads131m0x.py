@@ -382,24 +382,17 @@ class ADS131MxBase(LoadCellSensor):
         )
 
 
-class ADS131M02(ADS131MxBase):
-    def __init__(self, config: ConfigWrapper):
-        super().__init__(
-            config,
-            sensor_type="ads131m02",
-            default_sample_rate=500,
-            channel_count=2,
-        )
+def ADS131M02(config):
+    return ADS131MxBase(config,
+                        sensor_type="ads131m02",
+                        default_sample_rate=500,
+                        channel_count=2)
 
-
-class ADS131M04(ADS131MxBase):
-    def __init__(self, config: ConfigWrapper):
-        super().__init__(
-            config,
-            sensor_type="ads131m04",
-            default_sample_rate=500,
-            channel_count=4,
-        )
+def ADS131M04(config):
+    return ADS131MxBase(config,
+                        sensor_type="ads131m04",
+                        default_sample_rate=500,
+                        channel_count=4)
 
 
 ADS131M0X_SENSOR_TYPES = {
