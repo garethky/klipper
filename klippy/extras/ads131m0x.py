@@ -107,7 +107,7 @@ class ADS131MxBase:
         )
         self.spi = bus.MCU_SPI_from_config(config, 1, default_speed=8192000)
         mcu = self.spi.get_mcu()
-        self.mcu = self.spi.get_mcu()
+        self.mcu = mcu
         self.oid = mcu.create_oid()
         # Data Ready (DRDY) Pin
         drdy_pin = config.get("data_ready_pin")
@@ -116,8 +116,9 @@ class ADS131MxBase:
         self.data_ready_pin = drdy_ppin["pin"]
         if drdy_ppin["chip"] != self.mcu:
             raise config.error(
-                f"{self.sensor_type} config error: SPI communication and "
+                "%s config error: SPI communication and "
                 "data_ready_pin must be on the same MCU"
+                % (self.sensor_type,)
             )
         self.channel = config.getint("channel", default=0, minval=0,
             maxval=self.channel_count - 1)
@@ -142,13 +143,14 @@ class ADS131MxBase:
     def _build_config(self):
         cq = self.spi.get_command_queue()
         self.mcu.add_config_cmd(
-            f"config_ads131m0x oid={self.oid} spi_oid={self.spi.get_oid()} "
-            f"data_ready_pin={self.data_ready_pin} "
-            f"sensor_channel_count={self.channel_count} "
-            f"channel_mask={self.channel_mask}"
+            "config_ads131m0x oid=%d spi_oid=%d data_ready_pin=%s"
+            " sensor_channel_count=%d channel_mask=%d"
+            % (self.oid, self.spi.get_oid(), self.data_ready_pin,
+               self.channel_count, self.channel_mask)
         )
         self.mcu.add_config_cmd(
-            f"query_ads131m0x oid={self.oid} rest_ticks=0", on_restart=True
+            "query_ads131m0x oid=%d rest_ticks=0" % (self.oid,),
+            on_restart=True
         )
         self.query_ads131m0x_cmd = self.mcu.lookup_command(
             "query_ads131m0x oid=%c rest_ticks=%u", cq=cq
@@ -189,7 +191,9 @@ class ADS131MxBase:
             top_byte = (val >> 24) & 0xFF
             if top_byte != 0x00 and top_byte != 0xFF:
                 self.last_error_count += 1
-                logging.error(f"{self.sensor_type} sample error: {lookup_sensor_error(top_byte)}")
+                logging.error("%s sample error: %s"
+                              % (self.sensor_type,
+                                self.lookup_sensor_error(top_byte)))
                 continue
             samples[count] = (round(ptime, 6), val,
                 round(val * ADC_FACTOR, 9))
@@ -206,7 +210,8 @@ class ADS131MxBase:
             1.0 / (10.0 * self.get_samples_per_second())
         )
         self.query_ads131m0x_cmd.send([self.oid, rest_ticks])
-        logging.info(f"{self.sensor_type} starting '{self.name}' measurements")
+        logging.info("%s starting '%s' measurements"
+                     % (self.sensor_type, self.name))
         self.ffreader.note_start()
 
     def _finish_measurements(self):
@@ -214,7 +219,8 @@ class ADS131MxBase:
             return
         self.query_ads131m0x_cmd.send_wait_ack([self.oid, 0])
         self.ffreader.note_end()
-        logging.info(f"{self.sensor_type} finished '{self.name}' measurements")
+        logging.info("%s finished '%s' measurements"
+                     % (self.sensor_type, self.name))
 
     def _process_batch(self, eventtime):
         samples = self.ffreader.pull_samples()
@@ -275,7 +281,8 @@ class ADS131MxBase:
         resp = self._transfer_frame(self._rreg_cmd(addr))
         if len(resp) < msg_words + 1:
             raise self.printer.command_error(
-                f"{self.sensor_type} {self.name}: no response reading reg 0x{addr:02x}"
+                "%s %s: no response reading reg 0x%02x"
+                % (self.sensor_type, self.name, addr)
             )
         return resp[msg_words]
 
@@ -289,8 +296,8 @@ class ADS131MxBase:
         actual = self._read_reg(addr)
         if actual != value:
             raise self.printer.command_error(
-                f"{self.sensor_type} {self.name}: reg 0x{addr:02x} write "
-                f"failed: wrote 0x{value:04x}, read 0x{actual:04x}"
+                "%s %s: reg 0x%02x write failed: wrote 0x%04x, read 0x%04x"
+                % (self.sensor_type, self.name, addr, value, actual)
             )
 
     def reset_chip(self):
@@ -298,7 +305,8 @@ class ADS131MxBase:
         self.reactor.delay_for_ms(20.0)
         status = self._read_reg(STATUS_REG)
         logging.info(
-            f"{self.sensor_type} {self.name}: reset complete, STATUS=0x{status:04x}"
+            "%s %s: reset complete, STATUS=0x%04x"
+            % (self.sensor_type, self.name, status)
         )
 
     def _clock_channel_enable_bits(self):
@@ -323,8 +331,8 @@ class ADS131MxBase:
         mode_val = self._read_reg(MODE_REG)
         if (mode_val & 0x0300) != wlength_24:
             raise self.printer.command_error(
-                f"{self.sensor_type} {self.name}: MODE reg write failed: "
-                f"got 0x{mode_val:04x}"
+                "%s %s: MODE reg write failed: got 0x%04x"
+                % (self.sensor_type, self.name, mode_val)
             )
         # CLOCK register (0x03): set OSR for sample rate, high resolution mode
         # OSR[2:0] at bits 4:2, PWR[1:0] at bits 1:0
@@ -343,7 +351,8 @@ class ADS131MxBase:
         self.reactor.delay_for_ms(50.0)
         status = self._read_reg(STATUS_REG)
         logging.info(
-            f"{self.sensor_type} {self.name}: post-WAKEUP: STATUS=0x{status:04x}"
+            "%s %s: post-WAKEUP: STATUS=0x%04x"
+            % (self.sensor_type, self.name, status)
         )
 
 
