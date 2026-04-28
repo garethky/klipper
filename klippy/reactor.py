@@ -256,6 +256,8 @@ class SelectReactor:
             eventtime = g.parent.switch()
         # This greenlet activated from g.timer.callback (via _check_timers)
         return eventtime
+    def delay_for_ms(self, milliseconds):
+        self.pause(self.monotonic() + milliseconds / 1000.0)
     def _end_greenlet(self, g_old):
         # A timer/io event that called pause() has completed.
         # Cleanup the internal timer associated with this greenlet.
