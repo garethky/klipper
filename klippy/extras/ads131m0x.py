@@ -7,19 +7,7 @@
 # ADS131M04 - https://www.ti.com/lit/ds/symlink/ads131m04.pdf
 import logging
 from math import floor
-from typing import Dict
-
-from klippy import ConfigWrapper, Printer
-from klippy.extras import bus
-from klippy.extras.bulk_sensor import BatchBulkHelper, FixedFreqReader
-from klippy.extras.bus import MCU_SPI
-from klippy.extras.load_cell.interfaces import (
-    BulkAdcDataCallback,
-    LoadCellSensor,
-)
-from klippy.mcu import MCU
-from klippy.pins import PrinterPins
-from klippy.reactor import Reactor
+from . import bus, bulk_sensor
 
 # Constants
 WORD_SIZE = 3  # there are 3 bytes in a word in the protocol
@@ -35,7 +23,7 @@ GAIN1_REG = 0x04
 CFG_REG = 0x06
 PWR_HR = 0b10  # High resolution mode
 GLOBAL_CHOP_ENABLED = 0b1 << 8
-GLOBAL_CHOP_DELAY: Dict[int, int] = {
+GLOBAL_CHOP_DELAY = {
     2: 0b0000 << 9,
     4: 0b0001 << 9,
     8: 0b0010 << 9,
@@ -62,7 +50,7 @@ ERROR_CODES = {
     2: "DEVICE_RESET",
 }
 ADC_FACTOR = 1.0 / (1 << 23)
-GAIN_OPTIONS: Dict[int, int] = {
+GAIN_OPTIONS = {
     1: 0,
     2: 1,
     4: 2,
@@ -73,7 +61,7 @@ GAIN_OPTIONS: Dict[int, int] = {
     128: 7,
 }
 # SPS -> Oversampling Ration (OSR) code: OSR=fMOD/fDATA, fMOD=fCLKIN/2=4.096MHz
-OSR_LOOKUP: Dict[int, int] = {
+OSR_LOOKUP = {
     32000: 0 << 2,  # OSR=128
     16000: 1 << 2,  # OSR=256
     8000: 2 << 2,  # OSR=512
@@ -83,7 +71,7 @@ OSR_LOOKUP: Dict[int, int] = {
     500: 6 << 2,  # OSR=8192
     250: 7 << 2,  # OSR=16384
 }
-SAMPLE_RATE_OPTIONS: Dict[int, int] = dict(zip(OSR_LOOKUP.keys(), OSR_LOOKUP.keys()))
+SAMPLE_RATE_OPTIONS = dict(zip(OSR_LOOKUP.keys(), OSR_LOOKUP.keys()))
 
 
 def channels_to_mask(channel):
@@ -92,38 +80,38 @@ def channels_to_mask(channel):
     return channel_mask
 
 
-class ADS131MxBase(LoadCellSensor):
+class ADS131MxBase:
     def __init__(
         self,
-        config: ConfigWrapper,
-        sensor_type: str,
-        default_sample_rate: int,
-        channel_count: int,
+        config,
+        sensor_type,
+        default_sample_rate,
+        channel_count,
     ):
-        self.printer: Printer = config.get_printer()
-        self.reactor: Reactor = self.printer.get_reactor()
-        self.name: str = config.get_name().split()[-1]
-        self.sensor_type: str = sensor_type
-        self.channel_count: int = channel_count
-        self.last_error_count: int = 0
-        self.consecutive_fails: int = 0
-        self.sps: int = config.getchoice(
+        self.printer = config.get_printer()
+        self.reactor = self.printer.get_reactor()
+        self.name = config.get_name().split()[-1]
+        self.sensor_type = sensor_type
+        self.channel_count = channel_count
+        self.last_error_count = 0
+        self.consecutive_fails = 0
+        self.sps = config.getchoice(
             "sample_rate",
             SAMPLE_RATE_OPTIONS,
             default=default_sample_rate,
         )
-        self.gain: int = config.getchoice("gain", GAIN_OPTIONS, default=128)
-        self.enable_global_chop: bool = config.getboolean("enable_global_chop", False)
-        self.global_chop_delay: int = config.getchoice(
+        self.gain = config.getchoice("gain", GAIN_OPTIONS, default=128)
+        self.enable_global_chop = config.getboolean("enable_global_chop", False)
+        self.global_chop_delay = config.getchoice(
             "global_chop_delay", GLOBAL_CHOP_DELAY_SETTINGS, default=16
         )
-        self.spi: MCU_SPI = bus.MCU_SPI_from_config(config, 1, default_speed=8192000)
-        mcu: MCU = self.spi.get_mcu()
-        self.mcu: MCU = mcu
+        self.spi = bus.MCU_SPI_from_config(config, 1, default_speed=8192000)
+        mcu = self.spi.get_mcu()
+        self.mcu = self.spi.get_mcu()
         self.oid = mcu.create_oid()
         # Data Ready (DRDY) Pin
-        drdy_pin: str = config.get("data_ready_pin")
-        ppins: PrinterPins = self.printer.lookup_object("pins")
+        drdy_pin = config.get("data_ready_pin")
+        ppins = self.printer.lookup_object("pins")
         drdy_ppin = ppins.lookup_pin(drdy_pin)
         self.data_ready_pin = drdy_ppin["pin"]
         if drdy_ppin["chip"] != self.mcu:
@@ -131,15 +119,16 @@ class ADS131MxBase(LoadCellSensor):
                 f"{self.sensor_type} config error: SPI communication and "
                 "data_ready_pin must be on the same MCU"
             )
-        self.channel = config.getint("channel", default=0, minval=0, maxval=self.channel_count - 1)
+        self.channel = config.getint("channel", default=0, minval=0,
+            maxval=self.channel_count - 1)
         self.channel_mask = channels_to_mask(self.channel)
         # Bulk Sensor Setup
         chip_smooth = self.get_samples_per_second() * UPDATE_INTERVAL * 2
         self.unpack_format = "<i"
-        self.ffreader: FixedFreqReader = FixedFreqReader(
+        self.ffreader = bulk_sensor.FixedFreqReader(
             mcu, chip_smooth, self.unpack_format
         )
-        self.batch_bulk: BatchBulkHelper = BatchBulkHelper(
+        self.batch_bulk = bulk_sensor.BatchBulkHelper(
             self.printer,
             self._process_batch,
             self._start_measurements,
@@ -187,10 +176,10 @@ class ADS131MxBase(LoadCellSensor):
         # 24-bit signed range
         return -0x800000, 0x7FFFFF
 
-    def add_client(self, callback: BulkAdcDataCallback):
+    def add_client(self, callback):
         self.batch_bulk.add_client(callback)
 
-    def setup_trigger_analog(self, trigger_analog_oid: int):
+    def setup_trigger_analog(self, trigger_analog_oid):
         self.attach_trigger_analog_cmd.send([self.oid, trigger_analog_oid])
 
     # Measurement decoding
@@ -324,7 +313,8 @@ class ADS131MxBase(LoadCellSensor):
         return gain_val
 
     def setup_chip(self):
-        # MODE register (0x02): clear RESET bit (bit 10), set 24-bit word length (bits 9:8 = 01)
+        # MODE register (0x02): clear RESET bit (bit 10),
+        # set 24-bit word length (bits 9:8 = 01)
         # Reset default is 0x0510: RESET=1, WLENGTH=01, TIMEOUT=1
         wlength_24 = 0b01 << 8
         timeout_en = 1 << 4
