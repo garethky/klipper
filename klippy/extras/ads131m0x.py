@@ -23,7 +23,6 @@ from klippy.reactor import Reactor
 
 # Constants
 WORD_SIZE = 3  # there are 3 bytes in a word in the protocol
-BYTES_PER_SAMPLE = 4
 UPDATE_INTERVAL = 0.10
 NULL_CMD = 0x0000
 RESET_CMD = 0x0011
@@ -87,10 +86,9 @@ OSR_LOOKUP: Dict[int, int] = {
 SAMPLE_RATE_OPTIONS: Dict[int, int] = dict(zip(OSR_LOOKUP.keys(), OSR_LOOKUP.keys()))
 
 
-def channels_to_mask(channels):
+def channels_to_mask(channel):
     channel_mask = 0
-    for channel in channels:
-        channel_mask |= 1 << channel
+    channel_mask |= 1 << channel
     return channel_mask
 
 
@@ -133,11 +131,11 @@ class ADS131MxBase(LoadCellSensor):
                 f"{self.sensor_type} config error: SPI communication and "
                 "data_ready_pin must be on the same MCU"
             )
-        self.channels = self._read_channels(config)
-        self.channel_mask = channels_to_mask(self.channels)
+        self.channel = config.getint("channel", default=0, minval=0, maxval=self.channel_count - 1)
+        self.channel_mask = channels_to_mask(self.channel)
         # Bulk Sensor Setup
         chip_smooth = self.get_samples_per_second() * UPDATE_INTERVAL * 2
-        self.unpack_format = "<" + ("i" * len(self.channels))
+        self.unpack_format = "<i"
         self.ffreader: FixedFreqReader = FixedFreqReader(
             mcu, chip_smooth, self.unpack_format
         )
@@ -173,22 +171,6 @@ class ADS131MxBase(LoadCellSensor):
             "query_ads131m0x_status oid=%c", oid=self.oid, cq=cq
         )
 
-    def _read_channels(self, config: ConfigWrapper):
-        channels = config.getintlist("channels", default=(0,))
-        unique_channels = sorted(set(channels))
-        max_channel = self.channel_count - 1
-        for channel in unique_channels:
-            if channel < 0 or channel > max_channel:
-                raise config.error(
-                    f"{self.sensor_type.upper()} channels must be in range "
-                    f"0..{max_channel}"
-                )
-        if not unique_channels:
-            raise config.error(
-                f"{self.sensor_type.upper()} channels must contain at least one"
-            )
-        return unique_channels
-
     def get_mcu(self):
         return self.mcu
 
@@ -205,9 +187,6 @@ class ADS131MxBase(LoadCellSensor):
         # 24-bit signed range
         return -0x800000, 0x7FFFFF
 
-    def get_channel_count(self):
-        return len(self.channels)
-
     def add_client(self, callback: BulkAdcDataCallback):
         self.batch_bulk.add_client(callback)
 
@@ -216,22 +195,18 @@ class ADS131MxBase(LoadCellSensor):
 
     # Measurement decoding
     def _convert_samples(self, samples):
-        samples_out = []
-        for sample in samples:
-            ptime = sample[0]
-            channel_counts = sample[1:]
-            val = channel_counts[0]
+        count = 0
+        for ptime, val in samples:
             top_byte = (val >> 24) & 0xFF
             if top_byte != 0x00 and top_byte != 0xFF:
                 self.last_error_count += 1
                 logging.error(f"{self.sensor_type} sample error: {lookup_sensor_error(top_byte)}")
-                break
-            converted_sample = [round(ptime, 6)]
-            for channel in channel_counts:
-                converted_sample.append(channel)
-                converted_sample.append(channel * ADC_FACTOR)
-            samples_out.append(converted_sample)
-        return list(samples_out)
+                continue
+            samples[count] = (round(ptime, 6), val,
+                round(val * ADC_FACTOR, 9))
+            count += 1
+        del samples[count:]
+        return samples
 
     def _start_measurements(self):
         self.last_error_count = 0

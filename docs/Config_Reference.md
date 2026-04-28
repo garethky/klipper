@@ -5298,14 +5298,13 @@ data_ready_pin:
 #   The delay, in clock cycles, between sample in global chop mode. This allows
 #   additional time for settling before sampling starts. The chip default is 16
 #   clock cycles. Values are powers of 2 from 2 to 65536.
-#channels: 0
-#   Comma separated list of input channels to enable and sum. Valid channels are 0 and 1.
-#   The default is 0.
+#channel: 0
+#   The channel to sample. Valid channels are 0 and 1. The default is 0.
 ```
 
 #### ADS131M04
 
-The ADS131M04 is a 24 bit, 4-channel delta-sigma ADC with simultaneous sampling. It uses SPI communication and provides high precision measurements suitable for load cell probing. Up to 4 channels can be combined into a single sensor ideal for under bed load cells.
+The ADS131M04 is a 24 bit, 4-channel delta-sigma ADC with simultaneous sampling. It uses SPI communication and provides high precision measurements suitable for load cell probing.
 
 ```
 [load_cell]
@@ -5322,9 +5321,8 @@ data_ready_pin:
 #enable_global_chop: False
 #global_chop_delay: 16
 #   See the "ADS131M02" sections for details on these parameters.
-#channels: 0
-#   Comma separated list of input channels to enable and sum. Valid channels
-#   are: 0, 1, 2, 3. The default is 0.
+#channel: 0
+#   The channel to sample. Valid channels are 0, 1, 2 and 3. The default is 0.
 ```
 
 

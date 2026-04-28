@@ -24,7 +24,6 @@ struct ads131m0x_adc {
     uint8_t pending_flag;
     uint8_t sensor_channel_count;
     uint8_t channel_mask;
-    uint8_t sampled_channels;
     uint8_t sample_bytes;
     uint8_t frame_size;
     struct sensor_bulk sb;
@@ -114,17 +113,16 @@ ads131m0x_flush(struct ads131m0x_adc *adc, uint8_t oid)
 static void
 publish_samples(struct ads131m0x_adc *adc, uint8_t oid, uint8_t *msg)
 {
-    int32_t sum = 0;
     for (uint8_t i = 0; i < adc->sensor_channel_count; i++) {
         // skip channels that are not enabled
         if (!(adc->channel_mask & (1 << i))) {
             continue;
         }
         int32_t counts = extract_counts(msg, i);
-        sum += counts;
         buffer_append_int32(&adc->sb, counts);
+        trigger_analog_update(adc->ta, counts);
+        break;
     }
-    trigger_analog_update(adc->ta, sum);
     ads131m0x_flush(adc, oid);
 }
 
@@ -132,9 +130,7 @@ static void
 publish_error(struct ads131m0x_adc *adc, uint8_t oid, uint8_t error_code)
 {
     int32_t err_value = (int32_t)((uint32_t)error_code << 24);
-    for (uint8_t i = 0; i < adc->sampled_channels; i++) {
-        buffer_append_int32(&adc->sb, err_value);
-    }
+    buffer_append_int32(&adc->sb, err_value);
     trigger_analog_note_error(adc->ta, error_code);
     ads131m0x_flush(adc, oid);
 }
@@ -162,7 +158,7 @@ static void
 ads131m0x_read_adc(struct ads131m0x_adc *adc, uint8_t oid)
 {
     // Typical communication frame at 24-bit word length:
-    // 3-byte STATUS + 3-byte CH0 + 3-byte CH1 + 3-byte CRC.
+    // 3-byte STATUS + (3-bytes per channel * n channels) + 3-byte CRC.
     uint8_t msg[MAX_FRAME_SIZE] = {0};
     spidev_transfer(adc->spi, 1, adc->frame_size, msg);
     adc->pending_flag = 0;
@@ -202,12 +198,7 @@ command_config_ads131m0x(uint32_t *args)
     if (!adc->channel_mask || adc->channel_mask >> adc->sensor_channel_count) {
         shutdown("ads131m0x invalid channel_mask");
     }
-    // count number of bits set in the mask
-    uint8_t mask_bits = adc->channel_mask;
-    for (adc->sampled_channels = 0; mask_bits; adc->sampled_channels++) {
-        mask_bits &= mask_bits - 1; // clear the least significant bit set
-    }
-    adc->sample_bytes = BYTES_PER_SAMPLE * adc->sampled_channels;
+    adc->sample_bytes = BYTES_PER_SAMPLE;
     adc->frame_size = (2 + adc->sensor_channel_count) * SENSOR_WORD_SIZE;
 }
 DECL_COMMAND(command_config_ads131m0x,
