@@ -11,14 +11,14 @@
 #include "command.h" // DECL_COMMAND
 #include "sched.h" // sched_add_timer
 #include "sensor_bulk.h" // sensor_bulk_report
-#include "load_cell_probe.h" // load_cell_probe_report_sample
+#include "trigger_analog.h" // trigger_analog_update
 #include "spicmds.h" // spidev_transfer
 #include <stdint.h>
 
 struct ads131m0x_adc {
     struct timer timer;
     uint32_t rest_ticks;
-    uint32_t hard_error_latch;
+    uint8_t hard_error_latch;
     struct gpio_in data_ready;
     struct spidev_s *spi;
     uint8_t pending_flag;
@@ -28,12 +28,17 @@ struct ads131m0x_adc {
     uint8_t sample_bytes;
     uint8_t frame_size;
     struct sensor_bulk sb;
-    struct load_cell_probe *lce;
+    struct trigger_analog *ta;
 };
 
-// Error codes sent as sample values (use high bits to distinguish from valid data)
-#define SAMPLE_ERROR_CRC     (1L << 31)
-#define SAMPLE_ERROR_RESET   (1L << 30)
+// Error codes sent as sample values (or trsync error)
+enum {
+    SENSOR_ERROR_CRC = 1, SENSOR_ERROR_RESET = 2
+};
+
+DECL_ENUMERATION("ads131m0x_error:", "SENSOR_ERROR_CRC", SENSOR_ERROR_CRC);
+DECL_ENUMERATION("ads131m0x_error:", "SENSOR_ERROR_RESET", SENSOR_ERROR_RESET);
+
 #define BYTES_PER_SAMPLE     4
 #define SENSOR_WORD_SIZE     3
 #define MAX_ADC_CHANNELS     4
@@ -119,17 +124,18 @@ publish_samples(struct ads131m0x_adc *adc, uint8_t oid, uint8_t *msg)
         sum += counts;
         buffer_append_int32(&adc->sb, counts);
     }
-    if (adc->lce)
-        load_cell_probe_report_sample(adc->lce, sum);
+    trigger_analog_update(adc->ta, sum);
     ads131m0x_flush(adc, oid);
 }
 
 static void
-publish_error(struct ads131m0x_adc *adc, uint8_t oid, int32_t sample_error)
+publish_error(struct ads131m0x_adc *adc, uint8_t oid, uint8_t error_code)
 {
+    int32_t err_value = (int32_t)((uint32_t)error_code << 24);
     for (uint8_t i = 0; i < adc->sampled_channels; i++) {
-        buffer_append_int32(&adc->sb, sample_error);
+        buffer_append_int32(&adc->sb, err_value);
     }
+    trigger_analog_note_error(adc->ta, error_code);
     ads131m0x_flush(adc, oid);
 }
 
@@ -165,12 +171,12 @@ ads131m0x_read_adc(struct ads131m0x_adc *adc, uint8_t oid)
     // Check for unexpected device reset (RESET bit in status byte 0)
     // This is a hard error - once set, keep sending until measurement restart
     if (msg[0] & STATUS_RESET_BIT)
-        adc->hard_error_latch = SAMPLE_ERROR_RESET;
+        adc->hard_error_latch = SENSOR_ERROR_RESET;
     if (adc->hard_error_latch) {
         publish_error(adc, oid, adc->hard_error_latch);
     }
     else if (has_crc_error(adc, msg)) {
-        publish_error(adc, oid, SAMPLE_ERROR_CRC);
+        publish_error(adc, oid, SENSOR_ERROR_CRC);
     }
     else {
         publish_samples(adc, oid, msg);
@@ -209,13 +215,13 @@ DECL_COMMAND(command_config_ads131m0x,
     " sensor_channel_count=%c channel_mask=%c");
 
 void
-ads131m0x_attach_load_cell_probe(uint32_t *args) {
+ads131m0x_attach_trigger_analog(uint32_t *args) {
     uint8_t oid = args[0];
     struct ads131m0x_adc *adc = oid_lookup(oid, command_config_ads131m0x);
-    adc->lce = load_cell_probe_oid_lookup(args[1]);
+    adc->ta = trigger_analog_oid_lookup(args[1]);
 }
-DECL_COMMAND(ads131m0x_attach_load_cell_probe,
-    "ads131m0x_attach_load_cell_probe oid=%c load_cell_probe_oid=%c");
+DECL_COMMAND(ads131m0x_attach_trigger_analog,
+    "ads131m0x_attach_trigger_analog oid=%c trigger_analog_oid=%c");
 
 void
 command_query_ads131m0x(uint32_t *args)

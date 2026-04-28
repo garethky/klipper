@@ -57,10 +57,11 @@ GLOBAL_CHOP_DELAY: Dict[int, int] = {
 GLOBAL_CHOP_DELAY_SETTINGS = dict(
     zip(GLOBAL_CHOP_DELAY.keys(), GLOBAL_CHOP_DELAY.keys())
 )
-STATUS_RESET_BIT = 1 << 10  # RESET bit in STATUS register
 # Error codes from MCU (match sensor_ads131m02.c)
-SAMPLE_ERROR_CRC = -0x80000000  # 1 << 31 as signed
-SAMPLE_ERROR_RESET = 0x40000000  # 1 << 30
+ERROR_CODES = {
+    1: "CRC_ERROR",
+    2: "DEVICE_RESET",
+}
 ADC_FACTOR = 1.0 / (1 << 23)
 GAIN_OPTIONS: Dict[int, int] = {
     1: 0,
@@ -148,7 +149,7 @@ class ADS131MxBase(LoadCellSensor):
             UPDATE_INTERVAL,
         )
         mcu.register_config_callback(self._build_config)
-        self.attach_probe_cmd = None
+        self.attach_trigger_analog_cmd = None
         self.query_ads131m0x_cmd = None
 
     def _build_config(self):
@@ -165,8 +166,8 @@ class ADS131MxBase(LoadCellSensor):
         self.query_ads131m0x_cmd = self.mcu.lookup_command(
             "query_ads131m0x oid=%c rest_ticks=%u", cq=cq
         )
-        self.attach_probe_cmd = self.mcu.lookup_command(
-            "ads131m0x_attach_load_cell_probe oid=%c load_cell_probe_oid=%c"
+        self.attach_trigger_analog_cmd = self.mcu.lookup_command(
+            "ads131m0x_attach_trigger_analog oid=%c trigger_analog_oid=%c"
         )
         self.ffreader.setup_query_command(
             "query_ads131m0x_status oid=%c", oid=self.oid, cq=cq
@@ -197,6 +198,9 @@ class ADS131MxBase(LoadCellSensor):
             return int(floor(self.sps / 3))
         return self.sps
 
+    def lookup_sensor_error(self, error_code):
+        return ERROR_CODES.get(error_code, "Unknown error")
+
     def get_range(self):
         # 24-bit signed range
         return -0x800000, 0x7FFFFF
@@ -207,8 +211,8 @@ class ADS131MxBase(LoadCellSensor):
     def add_client(self, callback: BulkAdcDataCallback):
         self.batch_bulk.add_client(callback)
 
-    def attach_load_cell_probe(self, load_cell_probe_oid: int):
-        self.attach_probe_cmd.send([self.oid, load_cell_probe_oid])
+    def setup_trigger_analog(self, trigger_analog_oid: int):
+        self.attach_trigger_analog_cmd.send([self.oid, trigger_analog_oid])
 
     # Measurement decoding
     def _convert_samples(self, samples):
@@ -217,9 +221,10 @@ class ADS131MxBase(LoadCellSensor):
             ptime = sample[0]
             channel_counts = sample[1:]
             val = channel_counts[0]
-            if val == SAMPLE_ERROR_CRC or val == SAMPLE_ERROR_RESET:
+            top_byte = (val >> 24) & 0xFF
+            if top_byte != 0x00 and top_byte != 0xFF:
                 self.last_error_count += 1
-                logging.error(f"{self.sensor_type} sample error: {channel_counts[0]}")
+                logging.error(f"{self.sensor_type} sample error: {lookup_sensor_error(top_byte)}")
                 break
             converted_sample = [round(ptime, 6)]
             for channel in channel_counts:
